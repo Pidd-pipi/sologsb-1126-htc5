@@ -17,6 +17,7 @@ import type { FactorAssessment, RockfallRisk, WindDir, WindForce } from '@/types
 import { ROCKFALL_RISKS, WIND_DIRS, WIND_FORCES } from '@/types/factor'
 import { FACTOR_META, DEFAULT_WEIGHTS } from '@/types/score'
 import type { FactorKey, FactorWeights } from '@/types/score'
+import { assessFreshness } from '@/utils/freshness'
 import {
   buildFactorRows,
   buildNormalizedMatrix,
@@ -202,12 +203,14 @@ const previewNormalize = computed(() => profileStore.activeProfile?.normalize ??
 const previewRaw = computed(() => rawValuesOf(previewSite.value, previewFactor.value))
 
 /**
- * 极差归一必须同批比较：把「已在库营位 + 当前候选营位」放进同一批，
- * 否则单条样本跨度为零，候选营位会拿到虚高的满分。
+ * 极差归一必须同批比较：把「在有效期内的已在库营位 + 当前候选营位」放进同一批，
+ * 超期待复评的营位不参与取样，否则单条样本跨度为零，候选营位会拿到虚高的满分。
  */
 const previewMatrix = computed(() => {
+  const reviewDays = profileStore.activeReviewDays
   const entries = siteStore.list
     .filter((s): s is typeof s & { id: number } => typeof s.id === 'number')
+    .filter((s) => !assessFreshness(siteStore.latestFactor(s.id), reviewDays).overdue)
     .map((s) => ({ siteId: s.id, values: rawValuesOf(s, siteStore.latestFactor(s.id)) }))
   entries.push({ siteId: 0, values: previewRaw.value })
   return buildNormalizedMatrix(entries, previewNormalize.value)

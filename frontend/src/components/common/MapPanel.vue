@@ -9,7 +9,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { Campsite } from '@/types/campsite'
 import type { Grade } from '@/utils/score'
-import { GRADE_COLOR } from '@/utils/score'
+import { PENDING_STATUS, statusColor } from '@/utils/score'
 import { boundsOf, formatLat, formatLng, projectToGrid, unprojectFromGrid } from '@/utils/geo'
 import { useAmapLoader, type AmapMapInstance, type AmapMarker } from '@/hooks/useAmapLoader'
 
@@ -21,6 +21,8 @@ const props = withDefaults(
     selectedId?: number | null
     /** 每个营位的等级，用于着色 */
     gradeOf?: (siteId: number) => Grade
+    /** 每个营位的完整状态（等级或「待复评」）；提供时优先于 gradeOf，待复评营位绘成灰色 */
+    statusOf?: (siteId: number) => Grade | typeof PENDING_STATUS
     /** pick 模式下点击空白处会抛出经纬度（用于选点登记） */
     mode?: 'view' | 'pick'
     /** 地图高度 */
@@ -31,6 +33,7 @@ const props = withDefaults(
   {
     selectedId: null,
     gradeOf: undefined,
+    statusOf: undefined,
     mode: 'view',
     height: '420px',
     title: '营位分布'
@@ -58,8 +61,20 @@ const bounds = computed(() => boundsOf(props.sites.map((s) => ({ lng: s.lng, lat
 const points = computed(() =>
   props.sites.map((site) => {
     const pt = projectToGrid({ lng: site.lng, lat: site.lat }, bounds.value, GRID_W, GRID_H)
-    const grade: Grade = props.gradeOf ? props.gradeOf(site.id ?? -1) : 'C'
-    return { site, x: pt.x, y: pt.y, color: GRADE_COLOR[grade], grade }
+    const status: Grade | typeof PENDING_STATUS = props.statusOf
+      ? props.statusOf(site.id ?? -1)
+      : props.gradeOf
+        ? props.gradeOf(site.id ?? -1)
+        : 'C'
+    const pending = status === PENDING_STATUS
+    return {
+      site,
+      x: pt.x,
+      y: pt.y,
+      color: statusColor(status),
+      grade: pending ? '待' : status,
+      pending
+    }
   })
 )
 
@@ -160,7 +175,11 @@ watch(
 )
 
 watch(
-  () => props.sites.map((s) => `${s.id}:${s.lng}:${s.lat}`).join('|'),
+  // 标记内容同时依赖坐标与等级 / 待复评状态：补录实测、切换方案后颜色都要跟着刷新。
+  () =>
+    points.value
+      .map((p) => `${p.site.id}:${p.site.lng}:${p.site.lat}:${p.color}:${p.grade}`)
+      .join('|'),
   () => {
     if (amap.value && !degraded.value) renderAmapMarkers()
   }
@@ -179,6 +198,12 @@ onBeforeUnmount(() => {
         <span class="map-panel__count">{{ sites.length }} 个营位</span>
       </div>
       <div class="map-panel__mode">
+        <span class="map-panel__legendDots" aria-hidden="true">
+          <i style="background: #15803d" title="A 级" />
+          <i style="background: #d97706" title="B 级" />
+          <i style="background: #b91c1c" title="C 级" />
+          <i class="is-pending" style="background: #6b7280" title="待复评" />
+        </span>
         <el-tag v-if="degraded" type="warning" effect="plain" size="small">
           SVG 网格降级视图
         </el-tag>
@@ -252,8 +277,16 @@ onBeforeUnmount(() => {
           :aria-label="`${pt.site.code} ${pt.site.name}`"
           @click.stop="emit('select', pt.site.id as number)"
         >
-          <circle :cx="pt.x" :cy="pt.y" r="16" :fill="pt.color" opacity="0.16" />
-          <circle :cx="pt.x" :cy="pt.y" r="9" :fill="pt.color" stroke="#ffffff" stroke-width="2" />
+          <circle :cx="pt.x" :cy="pt.y" r="16" :fill="pt.color" :opacity="pt.pending ? 0.28 : 0.16" />
+          <circle
+            :cx="pt.x"
+            :cy="pt.y"
+            r="9"
+            :fill="pt.color"
+            :stroke="pt.pending ? '#374151' : '#ffffff'"
+            :stroke-width="pt.pending ? 1.5 : 2"
+            :stroke-dasharray="pt.pending ? '3 2' : undefined"
+          />
           <text :x="pt.x" :y="pt.y + 3.5" text-anchor="middle" class="map-panel__nodeText">
             {{ pt.grade }}
           </text>
@@ -328,6 +361,26 @@ onBeforeUnmount(() => {
 .map-panel__count {
   font-size: 12px;
   color: var(--gb-muted);
+}
+.map-panel__mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.map-panel__legendDots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.map-panel__legendDots i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.map-panel__legendDots i.is-pending {
+  box-shadow: 0 0 0 1.5px #374151 inset;
+  opacity: 0.85;
 }
 .map-panel__notice {
   margin: 0;

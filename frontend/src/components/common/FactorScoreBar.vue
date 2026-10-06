@@ -34,12 +34,20 @@ const props = withDefaults(
 
 const rawText = computed(() => formatFactorValue(props.factorKey, props.raw))
 const ratioText = computed(() => formatPercent(props.weightRatio))
+/** 待复评营位退出比较，归一化得分为空（NaN），打分条置灰且不展示数值。 */
+const isInactive = computed(() => !Number.isFinite(props.normalized))
 const barColor = computed(() => {
   const n = props.normalized
+  if (!Number.isFinite(n)) return '#9ca3af'
   if (n >= 78) return '#15803d'
   if (n >= 58) return '#d97706'
   return '#b91c1c'
 })
+const fillWidth = computed(() => {
+  if (!Number.isFinite(props.normalized)) return 0
+  return Math.min(100, Math.max(0, props.normalized))
+})
+const normalizedText = computed(() => (isInactive.value ? '—' : Math.round(props.normalized)))
 const directionText = computed(() => (props.higherIsBetter ? '越大越优' : '越小越优'))
 </script>
 
@@ -53,11 +61,12 @@ const directionText = computed(() => (props.higherIsBetter ? '越大越优' : '�
     <div class="factor-bar__track">
       <div
         class="factor-bar__fill"
-        :style="{ width: `${Math.min(100, Math.max(0, normalized))}%`, background: barColor }"
+        :class="{ 'factor-bar__fill--idle': isInactive }"
+        :style="{ width: `${fillWidth}%`, background: barColor }"
       />
     </div>
     <div class="factor-bar__foot">
-      <span class="factor-bar__normalized">归一 {{ normalized }}</span>
+      <span class="factor-bar__normalized">{{ isInactive ? '退出比较 · 归一 ' : '归一 ' }}{{ normalizedText }}</span>
       <span class="factor-bar__weight">
         权重 {{ weight }}（占比 {{ ratioText }}<template v-if="typeof contribution === 'number'">
           · 贡献 {{ contribution }}</template
@@ -112,6 +121,9 @@ const directionText = computed(() => (props.higherIsBetter ? '越大越优' : '�
   height: 100%;
   border-radius: 999px;
   transition: width 0.25s ease;
+}
+.factor-bar__fill--idle {
+  opacity: 0.45;
 }
 .factor-bar__foot {
   display: flex;

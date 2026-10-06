@@ -9,6 +9,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import MapPanel from '@/components/common/MapPanel.vue'
 import FactorScoreBar from '@/components/common/FactorScoreBar.vue'
 import GradeBadge from '@/components/common/GradeBadge.vue'
+import FreshnessBadge from '@/components/common/FreshnessBadge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
@@ -34,26 +35,30 @@ const uiStore = useUiStore()
 const siteId = computed(() => Number(route.params.id))
 const site = computed(() => siteStore.byId(siteId.value))
 
-const { scoreOf } = useRanking({
+const { scoreOf, statusOfSite } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
   weights: () => profileStore.activeWeights,
   normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
   thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  reviewDays: () => profileStore.activeReviewDays,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
 const scoreRow = computed(() => scoreOf(siteId.value))
 
-/** 供 MapPanel 与地图标记回调使用（避免在模板里写带类型标注的箭头函数） */
+const reviewDays = computed(() => profileStore.activeReviewDays)
+
+/** 供 MapPanel 与地图标记回调使用（待复评营位返回 pending，由地图按灰色绘制） */
 function gradeOfSite(id: number): Grade {
-  return scoreOf(id)?.grade ?? 'C'
+  return statusOfSite(id) === 'pending' ? 'C' : scoreOf(id)?.grade ?? 'C'
 }
 
 function openSite(id: number): void {
   void router.push(`/sites/${id}`)
 }
-const grade = computed(() => scoreRow.value?.grade ?? 'C')
+const grade = computed<Grade>(() => (scoreRow.value?.pendingReview ? 'C' : scoreRow.value?.grade ?? 'C'))
+const isPending = computed(() => scoreRow.value?.pendingReview ?? false)
 const factorHistory = computed(() => siteStore.factorsOf(siteId.value))
 const vetoList = computed(() => uiStore.vetosOf(siteId.value))
 
@@ -110,7 +115,11 @@ async function submitFactor(): Promise<void> {
       updatedAt: ''
     })
     showFactorForm.value = false
-    ElMessage.success('已追加一轮因子评估，名次与等级同步刷新')
+    ElMessage.success(
+      isPending.value
+        ? '已补录新一轮现场实测，待复评标记清除，立即回到本批比较'
+        : '已追加一轮因子评估，名次与等级同步刷新'
+    )
   } catch (err) {
     ElMessage.error(`追加失败：${err instanceof Error ? err.message : String(err)}`)
   }
@@ -259,10 +268,20 @@ watch(
       :description="vetoList.map((v) => `${v.type}：${v.description}`).join(' ｜ ')"
     />
 
+    <el-alert
+      v-if="isPending"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="现场实测已超过复评时效，该营位已退出本批比较（待复评）"
+      :description="`最新一轮实测为 ${scoreRow?.freshness.assessedAt}，当前方案要求 ${reviewDays} 天内复评；在下方补录新一轮实测后立即回到名次、等级与地图着色，待复评标记自动清除。`"
+    />
+
     <MapPanel
       :sites="siteStore.list"
       :selected-id="siteId"
       :grade-of="gradeOfSite"
+      :status-of="statusOfSite"
       height="360px"
       :title="`营位定位 · ${site.code}`"
       @select="openSite"
@@ -271,15 +290,16 @@ watch(
     <div class="stat-row">
       <div class="stat-card">
         <div class="stat-card__label">综合得分</div>
-        <div class="stat-card__value">{{ scoreRow?.total ?? '—' }}</div>
+        <div class="stat-card__value">{{ isPending ? '待复评' : scoreRow?.total ?? '—' }}</div>
         <div class="stat-card__extra">方案 {{ profileStore.activeProfile?.name ?? '—' }}</div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">推荐等级</div>
         <div class="stat-card__value">
-          <GradeBadge :grade="grade" size="large" :vetoed="vetoList.length > 0" />
+          <FreshnessBadge v-if="isPending" :freshness="scoreRow!.freshness" :review-days="reviewDays" />
+          <GradeBadge v-else :grade="grade" size="large" :vetoed="vetoList.length > 0" :show-label="false" />
         </div>
-        <div class="stat-card__extra">名次第 {{ scoreRow?.rank ?? '—' }} 位</div>
+        <div class="stat-card__extra">{{ isPending ? '已退出本批比较' : `名次第 ${scoreRow?.rank ?? '—'} 位` }}</div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">坐标</div>
@@ -377,11 +397,22 @@ watch(
       <div class="panel__head">
         <h2>因子打分表</h2>
         <span class="weight-note">
+          <template v-if="scoreRow">
+            <FreshnessBadge :freshness="scoreRow.freshness" :review-days="reviewDays" class="mr6" />
+          </template>
           归一方式：{{ profileStore.activeProfile ? NORMALIZE_LABELS[profileStore.activeProfile.normalize] : '—' }}
           · 等级阈值 A ≥ {{ profileStore.activeProfile?.thresholds.gradeA ?? 78 }} / B ≥
           {{ profileStore.activeProfile?.thresholds.gradeB ?? 58 }}
         </span>
       </div>
+      <el-alert
+        v-if="isPending"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="以下为最近一轮实测的原始读数，仅供复评参考，不计入当前归一化与名次。"
+        class="factor-pending-alert"
+      />
       <div class="factor-grid">
         <FactorScoreBar
           v-for="row in factorRows"
@@ -397,8 +428,15 @@ watch(
         />
       </div>
       <p class="panel__hint">
-        当前名次所用因子来自最新一轮评估（{{ siteStore.latestFactor(siteId)?.assessedAt ?? '暂无' }}，
-        评估人 {{ siteStore.latestFactor(siteId)?.assessor ?? '—' }}）。
+        <template v-if="scoreRow?.pendingReview">
+          该营位已超期退出比较：最新一轮评估为 {{ scoreRow.freshness.assessedAt }}（应于
+          {{ scoreRow.freshness.dueAt }} 前复评，时效 {{ reviewDays }} 天），补录后立即回到名次。
+        </template>
+        <template v-else>
+          当前名次所用因子来自最新一轮评估（{{ siteStore.latestFactor(siteId)?.assessedAt ?? '暂无' }}，
+          评估人 {{ siteStore.latestFactor(siteId)?.assessor ?? '—' }}；应在
+          {{ scoreRow?.freshness.dueAt ?? '—' }} 前复评。
+        </template>
       </p>
     </section>
 
@@ -646,5 +684,11 @@ watch(
 }
 .review-form {
   margin-bottom: 12px;
+}
+.factor-pending-alert {
+  margin-bottom: 10px;
+}
+.mr6 {
+  margin-right: 6px;
 }
 </style>

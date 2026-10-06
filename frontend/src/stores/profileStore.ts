@@ -3,7 +3,8 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { db, toPlain } from '@/utils/db'
 import type { FactorWeights, ScoreProfile } from '@/types/score'
-import { DEFAULT_WEIGHTS } from '@/types/score'
+import { DEFAULT_REVIEW_DAYS, DEFAULT_WEIGHTS } from '@/types/score'
+import { normalizeReviewDays } from '@/utils/freshness'
 import { nowIso } from '@/utils/format'
 
 export const useProfileStore = defineStore('profile', () => {
@@ -19,6 +20,11 @@ export const useProfileStore = defineStore('profile', () => {
     ...DEFAULT_WEIGHTS,
     ...(activeProfile.value?.weights ?? {})
   }))
+
+  /** 启用方案的复评时效（天）；缺失 / 非法时按默认口径（旱季一个月）。 */
+  const activeReviewDays = computed<number>(() =>
+    normalizeReviewDays(activeProfile.value?.reviewDays ?? DEFAULT_REVIEW_DAYS)
+  )
 
   async function load(): Promise<void> {
     loading.value = true
@@ -36,6 +42,7 @@ export const useProfileStore = defineStore('profile', () => {
       ...input,
       weights: { ...DEFAULT_WEIGHTS, ...input.weights },
       thresholds: { ...input.thresholds },
+      reviewDays: normalizeReviewDays(input.reviewDays ?? DEFAULT_REVIEW_DAYS),
       createdAt: now,
       updatedAt: now
     }) as ScoreProfile
@@ -46,7 +53,11 @@ export const useProfileStore = defineStore('profile', () => {
   }
 
   async function updateProfile(id: number, patch: Partial<ScoreProfile>): Promise<void> {
-    await db.profiles.update(id, toPlain({ ...patch, updatedAt: nowIso() }))
+    const next = { ...patch }
+    if (next.reviewDays !== undefined) {
+      next.reviewDays = normalizeReviewDays(next.reviewDays)
+    }
+    await db.profiles.update(id, toPlain({ ...next, updatedAt: nowIso() }))
     await load()
   }
 
@@ -58,6 +69,7 @@ export const useProfileStore = defineStore('profile', () => {
       weights: { ...DEFAULT_WEIGHTS, ...(src?.weights ?? {}) },
       normalize: src?.normalize ?? 'minmax',
       thresholds: { ...(src?.thresholds ?? { gradeA: 78, gradeB: 58 }) },
+      reviewDays: normalizeReviewDays(src?.reviewDays ?? DEFAULT_REVIEW_DAYS),
       season: season ?? src?.season ?? '四季通用',
       active: false,
       note: src?.note ? `由「${src.name}」复制：${src.note}` : `由「${src?.name ?? '默认方案'}」复制`,
@@ -98,6 +110,7 @@ export const useProfileStore = defineStore('profile', () => {
     total,
     activeProfile,
     activeWeights,
+    activeReviewDays,
     load,
     createProfile,
     updateProfile,

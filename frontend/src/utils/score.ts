@@ -205,6 +205,17 @@ export const GRADE_COLOR: Record<Grade, string> = {
   C: '#b91c1c'
 }
 
+/**
+ * 地图 / 标签状态色：在比营位按 A/B/C 着色；
+ * 超期退出比较的营位用灰色「待复评」，与等级色区分，避免被误读为 C 级。
+ */
+export const PENDING_STATUS = 'pending' as const
+export const PENDING_COLOR = '#6b7280'
+
+export function statusColor(status: Grade | typeof PENDING_STATUS): string {
+  return status === PENDING_STATUS ? PENDING_COLOR : GRADE_COLOR[status]
+}
+
 export const GRADE_LABEL: Record<Grade, string> = {
   A: 'A 级 · 优先推荐',
   B: 'B 级 · 可作备选',

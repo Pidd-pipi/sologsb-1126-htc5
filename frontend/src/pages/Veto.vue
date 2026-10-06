@@ -26,6 +26,7 @@ const { scoreOf } = useRanking({
   weights: () => profileStore.activeWeights,
   normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
   thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  reviewDays: () => profileStore.activeReviewDays,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -70,8 +71,9 @@ const vetoLedger = computed(() =>
         siteCode: site?.code ?? '—',
         siteName: site?.name ?? '营位已删除',
         campName: site?.campName ?? '—',
-        grade: row?.grade ?? 'C',
-        total: row?.total ?? 0
+        grade: row?.pendingReview ? null : row?.grade ?? 'C',
+        pending: row?.pendingReview ?? false,
+        total: row?.pendingReview ? NaN : row?.total ?? 0
       }
     })
     .sort((a, b) => (a.judgedAt < b.judgedAt ? 1 : -1))
@@ -224,8 +226,9 @@ function focusSite(id: number | undefined): void {
       <section class="panel">
         <div class="panel__head">
           <h2>选中营位预览</h2>
+          <el-tag v-if="selectedRow?.pendingReview" type="warning" size="small">待复评 · 已退出比较</el-tag>
           <GradeBadge
-            v-if="selectedRow"
+            v-else-if="selectedRow"
             :grade="selectedRow.grade"
             :score="selectedRow.total"
             :vetoed="selectedVetos.length > 0"
@@ -298,9 +301,10 @@ function focusSite(id: number | undefined): void {
         <el-table-column label="判定日期" width="112">
           <template #default="{ row }">{{ formatDate(row.judgedAt) }}</template>
         </el-table-column>
-        <el-table-column label="当前等级" width="170">
+        <el-table-column label="当前状态" width="170">
           <template #default="{ row }">
-            <GradeBadge :grade="row.grade" :score="row.total" vetoed size="small" :show-label="false" />
+            <el-tag v-if="row.pending" type="warning" size="small">待复评 · 退出比较</el-tag>
+            <GradeBadge v-else :grade="row.grade" :score="row.total" vetoed size="small" :show-label="false" />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="150" fixed="right">

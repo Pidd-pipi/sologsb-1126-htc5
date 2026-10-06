@@ -20,6 +20,25 @@ export type FactorKey =
 /** 归一化方式 */
 export type NormalizeMethod = 'minmax' | 'threshold'
 
+/**
+ * 复评时效（天）：营位现场实测读数的有效期。
+ * 雨季（汛期）变化快、两周复评；旱季稳定、一个月复评。
+ * 超过时效仍未补录新一轮实测的营位退出本批比较，标记为「待复评」。
+ */
+export const REVIEW_DAYS_RAINY = 14
+export const REVIEW_DAYS_DRY = 30
+/** 旧数据升级后未设置时效时的默认口径（旱季一个月）。 */
+export const DEFAULT_REVIEW_DAYS = REVIEW_DAYS_DRY
+/** 允许配置的时效下限 / 上限（天）。 */
+export const MIN_REVIEW_DAYS = 1
+export const MAX_REVIEW_DAYS = 180
+
+/** 复评时效快捷口径（方案配置与迁移回填共用）。 */
+export const REVIEW_PRESETS: Array<{ label: string; days: number }> = [
+  { label: '雨季两周', days: REVIEW_DAYS_RAINY },
+  { label: '旱季一个月', days: REVIEW_DAYS_DRY }
+]
+
 /** 因子权重表：每项 0-100 */
 export type FactorWeights = Record<FactorKey, number>
 
@@ -40,6 +59,12 @@ export interface ScoreProfile {
   normalize: NormalizeMethod
   /** 等级阈值 A/B/C */
   thresholds: GradeThresholds
+  /**
+   * 复评时效（天）：现场实测读数自评估日起的有效期。
+   * 超期未补录新一轮实测的营位退出本批比较并标为「待复评」；
+   * 雨季两周（14）、旱季一个月（30），旧数据迁移时按 DEFAULT_REVIEW_DAYS 回填。
+   */
+  reviewDays: number
   /** 适用季节 */
   season: string
   /** 是否为当前启用方案 */

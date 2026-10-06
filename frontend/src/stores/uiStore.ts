@@ -7,7 +7,8 @@ import { defineStore } from 'pinia'
 import { db, toPlain } from '@/utils/db'
 import type { RiskVeto } from '@/types/veto'
 import type { FactorWeights, NormalizeMethod, GradeThresholds } from '@/types/score'
-import { DEFAULT_WEIGHTS } from '@/types/score'
+import { DEFAULT_REVIEW_DAYS, DEFAULT_WEIGHTS } from '@/types/score'
+import { normalizeReviewDays } from '@/utils/freshness'
 import type { AccessMode, SurfaceType } from '@/types/campsite'
 import { nowIso, todayIso } from '@/utils/format'
 
@@ -25,6 +26,8 @@ export const useUiStore = defineStore('ui', () => {
   const workingWeights = ref<FactorWeights>({ ...DEFAULT_WEIGHTS })
   const workingNormalize = ref<NormalizeMethod>('minmax')
   const workingThresholds = ref<GradeThresholds>({ gradeA: 78, gradeB: 58 })
+  /** 临时复评时效（天），拖动后名次实时按该时效把超期营位移出比较 */
+  const workingReviewDays = ref<number>(DEFAULT_REVIEW_DAYS)
   const workingSeason = ref<string>('四季通用')
   const dirty = ref(false)
 
@@ -79,13 +82,22 @@ export const useUiStore = defineStore('ui', () => {
     weights: FactorWeights,
     normalize: NormalizeMethod,
     thresholds: GradeThresholds,
-    season: string
+    season: string,
+    reviewDays: number = DEFAULT_REVIEW_DAYS
   ): void {
     workingWeights.value = { ...DEFAULT_WEIGHTS, ...weights }
     workingNormalize.value = normalize
     workingThresholds.value = { ...thresholds }
+    workingReviewDays.value = normalizeReviewDays(reviewDays)
     workingSeason.value = season
     dirty.value = false
+  }
+
+  function setWorkingReviewDays(days: number | number[] | undefined): void {
+    const num = Array.isArray(days) ? days[0] : days
+    if (typeof num !== 'number') return
+    workingReviewDays.value = normalizeReviewDays(num)
+    dirty.value = true
   }
 
   function resetFilters(): void {
@@ -108,6 +120,7 @@ export const useUiStore = defineStore('ui', () => {
     workingWeights,
     workingNormalize,
     workingThresholds,
+    workingReviewDays,
     workingSeason,
     dirty,
     focusedSiteId,
@@ -118,6 +131,7 @@ export const useUiStore = defineStore('ui', () => {
     vetosOf,
     isVetoed,
     syncFromProfile,
+    setWorkingReviewDays,
     resetFilters
   }
 })

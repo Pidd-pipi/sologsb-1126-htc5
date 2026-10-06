@@ -14,10 +14,11 @@ import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
 import type { Grade } from '@/utils/score'
+import { PENDING_STATUS } from '@/utils/score'
+import FreshnessBadge from '@/components/common/FreshnessBadge.vue'
 import { useAmapLoader } from '@/hooks/useAmapLoader'
 import { SURFACE_TYPES } from '@/types/campsite'
 import { formatLat, formatLng, distanceMeters, formatDistance } from '@/utils/geo'
-import { formatDate } from '@/utils/format'
 
 const router = useRouter()
 const siteStore = useSiteStore()
@@ -40,20 +41,25 @@ const visibleSites = computed(() =>
   })
 )
 
-const { ranked, scoreOf } = useRanking({
+const { ranked, pending, scoreOf, statusOfSite } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
   weights: () => profileStore.activeWeights,
   normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
   thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  reviewDays: () => profileStore.activeReviewDays,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
+const reviewDays = computed(() => profileStore.activeReviewDays)
+
+/** 地图需要展示全部营位（含待复评），因此不能只取 ranked，而要用 rowsById 全集。 */
 const panelSites = computed(() =>
   visibleSites.value.filter((s) => {
     if (!gradeFilter.value) return true
-    const grade = s.id != null ? scoreOf(s.id)?.grade : undefined
-    return grade === gradeFilter.value
+    const status = s.id != null ? statusOfSite(s.id) : undefined
+    if (gradeFilter.value === PENDING_STATUS) return status === PENDING_STATUS
+    return status === gradeFilter.value
   })
 )
 
@@ -88,22 +94,26 @@ function onPanelMode(payload: { degraded: boolean; reason: string }): void {
 }
 
 function gradeOfSite(id: number): Grade {
-  return scoreOf(id)?.grade ?? 'C'
+  const status = statusOfSite(id)
+  return status === PENDING_STATUS ? 'C' : status
 }
+
+const pendingIds = computed(() => new Set(pending.value.map((r) => r.siteId)))
+const isSelectedPending = computed(
+  () => selectedId.value != null && pendingIds.value.has(selectedId.value)
+)
 
 function selectSite(id: number): void {
   selectedId.value = id
   uiStore.focusedSiteId = id
 }
 
-const gradeStats = computed(() => {
-  const rows = ranked.value
-  return [
-    { grade: 'A' as const, count: rows.filter((r) => r.grade === 'A').length, color: '#15803d' },
-    { grade: 'B' as const, count: rows.filter((r) => r.grade === 'B').length, color: '#d97706' },
-    { grade: 'C' as const, count: rows.filter((r) => r.grade === 'C').length, color: '#b91c1c' }
-  ]
-})
+const gradeStats = computed(() => [
+  { grade: 'A' as const, count: ranked.value.filter((r) => r.grade === 'A').length, color: '#15803d' },
+  { grade: 'B' as const, count: ranked.value.filter((r) => r.grade === 'B').length, color: '#d97706' },
+  { grade: 'C' as const, count: ranked.value.filter((r) => r.grade === 'C').length, color: '#b91c1c' },
+  { grade: PENDING_STATUS, count: pending.value.length, color: '#6b7280' }
+])
 </script>
 
 <template>
@@ -113,6 +123,7 @@ const gradeStats = computed(() => {
         <h1>营位地图</h1>
         <p>
           按推荐等级给营位标记着色，命中风险否决项的营位以红点提示；
+          现场实测超过复评时效的营位退出本批比较，以灰色「待」字标记显示。
           点击任一标记可查看该营位的得分构成、因子实测与否决记录。
         </p>
       </div>
@@ -140,9 +151,13 @@ const gradeStats = computed(() => {
 
     <div class="stat-row">
       <div v-for="g in gradeStats" :key="g.grade" class="stat-card">
-        <div class="stat-card__label">{{ g.grade }} 级营位</div>
+        <div class="stat-card__label">
+          {{ g.grade === PENDING_STATUS ? '待复评营位' : `${g.grade} 级营位` }}
+        </div>
         <div class="stat-card__value" :style="{ color: g.color }">{{ g.count }}</div>
-        <div class="stat-card__extra">共 {{ ranked.length }} 个候选营位</div>
+        <div class="stat-card__extra">
+          {{ g.grade === PENDING_STATUS ? `超 ${reviewDays} 天退出比较` : `本批在比 ${ranked.length} 个` }}
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">否决标记</div>
@@ -166,10 +181,11 @@ const gradeStats = computed(() => {
           <el-option v-for="s in SURFACE_TYPES" :key="s" :label="s" :value="s" />
         </el-select>
         <el-radio-group v-model="gradeFilter">
-          <el-radio-button value="">全部等级</el-radio-button>
+          <el-radio-button value="">全部</el-radio-button>
           <el-radio-button value="A">A 级</el-radio-button>
           <el-radio-button value="B">B 级</el-radio-button>
           <el-radio-button value="C">C 级</el-radio-button>
+          <el-radio-button :value="PENDING_STATUS">待复评</el-radio-button>
         </el-radio-group>
         <el-button
           text
@@ -190,8 +206,9 @@ const gradeStats = computed(() => {
       :sites="panelSites"
       :selected-id="selectedId"
       :grade-of="gradeOfSite"
+      :status-of="statusOfSite"
       height="460px"
-      title="营位分布与等级着色"
+      title="营位分布与等级着色（灰色 = 待复评）"
       @select="selectSite"
       @mode="onPanelMode"
     />
@@ -209,7 +226,13 @@ const gradeStats = computed(() => {
     <section v-if="selectedSite" class="panel">
       <div class="panel__head">
         <h2>{{ selectedSite.code }} · {{ selectedSite.name }}</h2>
+        <FreshnessBadge
+          v-if="isSelectedPending && selectedRow"
+          :freshness="selectedRow.freshness"
+          :review-days="reviewDays"
+        />
         <GradeBadge
+          v-else
           :grade="selectedRow?.grade ?? 'C'"
           :score="selectedRow?.total"
           :vetoed="selectedVetos.length > 0"
@@ -245,13 +268,16 @@ const gradeStats = computed(() => {
           <span>{{ nearest ? `${nearest.code} · ${formatDistance(nearest.meters)}` : '唯一营位' }}</span>
         </div>
         <div class="detail-item">
-          <span class="detail-item__label">最近评估</span>
+          <span class="detail-item__label">最近评估 / 复评</span>
           <span>
-            {{
-              siteStore.latestFactor(selectedSite.id)
-                ? `${formatDate(siteStore.latestFactor(selectedSite.id)?.assessedAt ?? '')} · ${siteStore.latestFactor(selectedSite.id)?.assessor}`
-                : '暂无评估'
-            }}
+            <template v-if="selectedRow">
+              {{ selectedRow.freshness.assessedAt ?? '暂无' }}
+              <template v-if="selectedRow.pendingReview">
+                · <el-tag type="danger" size="small">待复评</el-tag>
+              </template>
+              <template v-else>· {{ selectedRow.freshness.dueAt }} 前复评</template>
+            </template>
+            <template v-else>暂无评估</template>
           </span>
         </div>
       </div>

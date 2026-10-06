@@ -8,11 +8,20 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import WeightEditor from '@/components/common/WeightEditor.vue'
 import GradeBadge from '@/components/common/GradeBadge.vue'
+import FreshnessBadge from '@/components/common/FreshnessBadge.vue'
 import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
-import { NORMALIZE_LABELS, SEASONS, weightSumGuard } from '@/types/score'
+import {
+  MAX_REVIEW_DAYS,
+  MIN_REVIEW_DAYS,
+  NORMALIZE_LABELS,
+  REVIEW_DAYS_DRY,
+  REVIEW_DAYS_RAINY,
+  REVIEW_PRESETS,
+  SEASONS
+} from '@/types/score'
 import type { FactorWeights, NormalizeMethod, GradeThresholds } from '@/types/score'
 import { formatScore } from '@/utils/format'
 import { weightSum } from '@/utils/score'
@@ -28,6 +37,7 @@ const activeSnapshot = ref<{
   normalize: NormalizeMethod
   thresholds: GradeThresholds
   season: string
+  reviewDays: number
 } | null>(null)
 
 function snapshotActive(): void {
@@ -37,9 +47,10 @@ function snapshotActive(): void {
     weights: { ...p.weights },
     normalize: p.normalize,
     thresholds: { ...p.thresholds },
-    season: p.season
+    season: p.season,
+    reviewDays: p.reviewDays
   }
-  uiStore.syncFromProfile(p.weights, p.normalize, p.thresholds, p.season)
+  uiStore.syncFromProfile(p.weights, p.normalize, p.thresholds, p.season, p.reviewDays)
 }
 
 onMounted(() => {
@@ -51,12 +62,13 @@ watch(
   () => snapshotActive()
 )
 
-const { ranked, best } = useRanking({
+const { ranked, best, pending } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
   weights: () => uiStore.workingWeights,
   normalize: () => uiStore.workingNormalize,
   thresholds: () => uiStore.workingThresholds,
+  reviewDays: () => uiStore.workingReviewDays,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
 
@@ -67,7 +79,8 @@ const gradeDistribution = computed(() => {
   return {
     A: rows.filter((r) => r.grade === 'A').length,
     B: rows.filter((r) => r.grade === 'B').length,
-    C: rows.filter((r) => r.grade === 'C').length
+    C: rows.filter((r) => r.grade === 'C').length,
+    pending: pending.value.length
   }
 })
 
@@ -109,14 +122,22 @@ function onThresholdChange(): void {
   uiStore.dirty = true
 }
 
+function setReviewDays(value: number | number[] | undefined): void {
+  uiStore.setWorkingReviewDays(value)
+}
+
+function applyReviewPreset(days: number): void {
+  uiStore.setWorkingReviewDays(days)
+}
+
 function revertToActive(): void {
   const snap = activeSnapshot.value
   if (!snap) {
     ElMessage.info('当前没有启用中的方案')
     return
   }
-  uiStore.syncFromProfile(snap.weights, snap.normalize, snap.thresholds, snap.season)
-  ElMessage.success('已恢复到当前启用方案的权重')
+  uiStore.syncFromProfile(snap.weights, snap.normalize, snap.thresholds, snap.season, snap.reviewDays)
+  ElMessage.success('已恢复到当前启用方案的权重与复评时效')
 }
 
 /* --------------------------- 另存为季节方案 --------------------------- */
@@ -145,11 +166,12 @@ async function confirmSave(): Promise<void> {
     weights: { ...uiStore.workingWeights },
     normalize: uiStore.workingNormalize,
     thresholds: { ...uiStore.workingThresholds },
+    reviewDays: uiStore.workingReviewDays,
     season: saveForm.value.season,
     active: saveForm.value.activate,
     note:
       saveForm.value.note.trim() ||
-      `权重合计 ${totalWeight.value}，由「${profileStore.activeProfile?.name ?? '默认'}」另存`,
+      `权重合计 ${totalWeight.value}，复评时效 ${uiStore.workingReviewDays} 天，由「${profileStore.activeProfile?.name ?? '默认'}」另存`,
     createdAt: '',
     updatedAt: ''
   })
@@ -223,7 +245,8 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <div class="stat-card__value profile-name">{{ profileStore.activeProfile?.name ?? '—' }}</div>
         <div class="stat-card__extra">
           适用季节 {{ profileStore.activeProfile?.season ?? '—' }} ·
-          {{ profileStore.activeProfile ? NORMALIZE_LABELS[profileStore.activeProfile.normalize] : '—' }}
+          {{ profileStore.activeProfile ? NORMALIZE_LABELS[profileStore.activeProfile.normalize] : '—' }} ·
+          复评时效 {{ uiStore.workingReviewDays }} 天
         </div>
       </div>
       <div class="stat-card">
@@ -236,7 +259,9 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <div class="stat-card__value">
           {{ gradeDistribution.A }} / {{ gradeDistribution.B }} / {{ gradeDistribution.C }}
         </div>
-        <div class="stat-card__extra">随权重实时变化</div>
+        <div class="stat-card__extra">
+          随权重实时变化 · 待复评退出 {{ gradeDistribution.pending }} 个
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">当前第一名</div>
@@ -313,13 +338,42 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
             @update:model-value="setGradeB"
           />
         </div>
+        <div class="scoring-config__item">
+          <span class="scoring-config__label">复评时效</span>
+          <el-input-number
+            :model-value="uiStore.workingReviewDays"
+            :min="MIN_REVIEW_DAYS"
+            :max="MAX_REVIEW_DAYS"
+            :step="1"
+            size="small"
+            style="width: 130px"
+            controls-position="right"
+            @update:model-value="setReviewDays"
+          />
+          <span class="weight-note">天</span>
+          <el-button
+            v-for="preset in REVIEW_PRESETS"
+            :key="preset.days"
+            size="small"
+            :type="uiStore.workingReviewDays === preset.days ? 'primary' : 'default'"
+            plain
+            @click="applyReviewPreset(preset.days)"
+          >
+            {{ preset.label }}（{{ preset.days }} 天）
+          </el-button>
+          <span class="weight-note">
+            实测读数超过此时效未补录新一轮的营位退出本批比较并标为待复评，其余营位按同一口径重新归一。
+          </span>
+        </div>
       </div>
     </section>
 
     <section class="panel">
       <div class="panel__head">
-        <h2>实时名次（跟随权重刷新）</h2>
-        <span class="weight-note">共 {{ ranked.length }} 个营位</span>
+        <h2>实时名次（跟随权重 / 时效刷新）</h2>
+        <span class="weight-note">
+          本批在比 {{ ranked.length }} 个 · 待复评 {{ pending.length }} 个退出（时效 {{ uiStore.workingReviewDays }} 天）
+        </span>
       </div>
       <el-table :data="ranked" size="small" border stripe>
         <el-table-column label="名次" width="72" align="center">
@@ -349,9 +403,14 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
             <strong class="total">{{ formatScore(row.total) }}</strong>
           </template>
         </el-table-column>
-        <el-table-column label="等级" width="190">
+        <el-table-column label="等级" width="170">
           <template #default="{ row }">
             <GradeBadge :grade="row.grade" :score="row.total" :vetoed="row.vetoed" size="small" />
+          </template>
+        </el-table-column>
+        <el-table-column label="复评" width="118" align="center">
+          <template #default="{ row }">
+            <FreshnessBadge :freshness="row.freshness" :review-days="uiStore.workingReviewDays" inline />
           </template>
         </el-table-column>
         <el-table-column label="否决" width="120">
@@ -368,12 +427,36 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
           </template>
         </el-table-column>
       </el-table>
+
+      <el-table v-if="pending.length" :data="pending" size="small" border class="pending-table">
+        <el-table-column label="待复评营位（已退出本批比较）" min-width="240">
+          <template #default="{ row }">
+            <el-link type="primary" underline="never" @click="router.push(`/sites/${row.siteId}`)">
+              {{ row.site.code }} · {{ row.site.name }}
+            </el-link>
+            <div class="cell-sub">{{ row.site.campName }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="最近实测" width="150">
+          <template #default="{ row }">{{ row.freshness.assessedAt }}</template>
+        </el-table-column>
+        <el-table-column label="时效状态" width="200">
+          <template #default="{ row }">
+            <FreshnessBadge :freshness="row.freshness" :review-days="uiStore.workingReviewDays" />
+          </template>
+        </el-table-column>
+        <el-table-column label="处理" min-width="220">
+          <template #default>
+            <span class="muted">到营位详情补录新一轮实测，即可立即回到比较</span>
+          </template>
+        </el-table-column>
+      </el-table>
     </section>
 
     <section class="panel">
       <div class="panel__head">
         <h2>权重方案库</h2>
-        <span class="weight-note">启用中的方案会被首页、详情页与地图共同采用</span>
+        <span class="weight-note">启用中的方案会被首页、详情页与地图共同采用，复评时效随方案切换</span>
       </div>
       <el-table :data="profileStore.list" size="small" border>
         <el-table-column label="方案名" min-width="180">
@@ -387,8 +470,19 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <el-table-column label="归一方式" width="120">
           <template #default="{ row }">{{ NORMALIZE_LABELS[row.normalize as NormalizeMethod] }}</template>
         </el-table-column>
-        <el-table-column label="阈值 A / B" width="120" align="center">
+        <el-table-column label="阈值 A / B" width="110" align="center">
           <template #default="{ row }">{{ row.thresholds.gradeA }} / {{ row.thresholds.gradeB }}</template>
+        </el-table-column>
+        <el-table-column label="复评时效" width="110" align="center">
+          <template #default="{ row }">
+            <el-tag
+              size="small"
+              effect="plain"
+              :type="row.reviewDays === REVIEW_DAYS_RAINY ? 'warning' : row.reviewDays === REVIEW_DAYS_DRY ? 'success' : 'info'"
+            >
+              {{ row.reviewDays }} 天
+            </el-tag>
+          </template>
         </el-table-column>
         <el-table-column label="权重合计" width="106" align="center">
           <template #default="{ row }">{{ weightSum(row.weights) }}</template>
@@ -430,7 +524,8 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <el-form-item label="将保存">
           <span class="weight-note">
             权重合计 {{ totalWeight }} · {{ NORMALIZE_LABELS[uiStore.workingNormalize] }} · 阈值 A ≥
-            {{ uiStore.workingThresholds.gradeA }} / B ≥ {{ uiStore.workingThresholds.gradeB }}
+            {{ uiStore.workingThresholds.gradeA }} / B ≥ {{ uiStore.workingThresholds.gradeB }} ·
+            复评时效 {{ uiStore.workingReviewDays }} 天
           </span>
         </el-form-item>
       </el-form>
@@ -476,6 +571,9 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
 .cell-sub {
   font-size: 11px;
   color: var(--gb-muted);
+}
+.pending-table {
+  margin-top: 12px;
 }
 .ml6 {
   margin-left: 6px;

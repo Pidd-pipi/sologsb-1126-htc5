@@ -13,6 +13,7 @@ import { useRanking } from '@/hooks/useRanking'
 import { FACTOR_META } from '@/types/score'
 import { SURFACE_TYPES, ACCESS_MODES } from '@/types/campsite'
 import GradeBadge from '@/components/common/GradeBadge.vue'
+import FreshnessBadge from '@/components/common/FreshnessBadge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { formatScore } from '@/utils/format'
 import { NORMALIZE_LABELS } from '@/types/score'
@@ -36,14 +37,17 @@ const inputSites = computed(() =>
   })
 )
 
-const { ranked } = useRanking({
+const { ranked, pending } = useRanking({
   sites: () => inputSites.value,
   factorOf: (siteId: number) => siteStore.latestFactor(siteId),
   weights: () => profileStore.activeWeights,
   normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
   thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
+  reviewDays: () => profileStore.activeReviewDays,
   vetoedIds: () => uiStore.vetoedSiteIds
 })
+
+const reviewDays = computed(() => profileStore.activeReviewDays)
 
 const factorMetaOf = (key: string) => FACTOR_META.find((m) => m.key === key)
 
@@ -66,6 +70,7 @@ const stats = computed(() => {
     total: rows.length,
     gradeA: rows.filter((r) => r.grade === 'A').length,
     vetoed: rows.filter((r) => r.vetoed).length,
+    pending: pending.value.length,
     top: rows[0]?.total ?? 0,
     topName: rows[0] ? `${rows[0].site.code} ${rows[0].site.name}` : '—'
   }
@@ -89,6 +94,7 @@ function openDetail(siteId: number | undefined): void {
         <h1>营位名次表</h1>
         <p>
           按当前权重方案对全部候选营位加权求和后降序排列，实时给出 A/B/C 推荐等级；
+          现场实测超过方案复评时效的营位退出本批比较并标为「待复评」，其余营位按同一口径重新归一；
           命中风险否决项的营位整行标红并自动降为 C 级。
         </p>
       </div>
@@ -101,14 +107,21 @@ function openDetail(siteId: number | undefined): void {
 
     <div class="stat-row">
       <div class="stat-card">
-        <div class="stat-card__label">候选营位</div>
+        <div class="stat-card__label">本批在比营位</div>
         <div class="stat-card__value" data-testid="stat-total">{{ stats.total }}</div>
-        <div class="stat-card__extra">共 {{ siteStore.total }} 个已登记</div>
+        <div class="stat-card__extra">已登记 {{ siteStore.total }} 个 · 待复评 {{ stats.pending }} 个退出</div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">A 级推荐</div>
-        <div class="stat-card__value">{{ stats.gradeA }}</div>
-        <div class="stat-card__extra">阈值来自当前方案</div>
+        <div class="stat-card__value" data-testid="stat-grade-a">{{ stats.gradeA }}</div>
+        <div class="stat-card__extra">仅统计本批在比营位</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card__label">待复评</div>
+        <div class="stat-card__value" :style="{ color: stats.pending ? '#b45309' : undefined }" data-testid="stat-pending">
+          {{ stats.pending }}
+        </div>
+        <div class="stat-card__extra">超 {{ reviewDays }} 天未复评，已退出比较</div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">命中否决</div>
@@ -128,7 +141,7 @@ function openDetail(siteId: number | undefined): void {
       <div class="panel__head">
         <h2>筛选条件</h2>
         <span class="weight-note">
-          当前方案：{{ activeProfileName }} · 归一方式：{{ activeNormalize }}
+          当前方案：{{ activeProfileName }} · 归一方式：{{ activeNormalize }} · 复评时效：{{ reviewDays }} 天
         </span>
       </div>
       <div class="filters">
@@ -164,7 +177,7 @@ function openDetail(siteId: number | undefined): void {
     <section class="panel">
       <div class="panel__head">
         <h2>名次与得分</h2>
-        <span class="weight-note">共 {{ ranked.length }} 行</span>
+        <span class="weight-note">本批在比 {{ ranked.length }} 个 · 待复评 {{ pending.length }} 个退出</span>
       </div>
 
       <el-table
@@ -236,6 +249,11 @@ function openDetail(siteId: number | undefined): void {
             <GradeBadge :grade="row.grade" :score="row.total" :vetoed="row.vetoed" />
           </template>
         </el-table-column>
+        <el-table-column label="复评时效" width="168" align="center">
+          <template #default="{ row }">
+            <FreshnessBadge :freshness="row.freshness" :review-days="reviewDays" inline />
+          </template>
+        </el-table-column>
         <el-table-column label="否决项" min-width="180">
           <template #default="{ row }">
             <template v-if="row.vetoed">
@@ -255,13 +273,71 @@ function openDetail(siteId: number | undefined): void {
       </el-table>
 
       <EmptyState
-        v-else
+        v-else-if="siteStore.total === 0"
         title="还没有可评估的营位"
         description="先登记候选营位并录入因子（坡度、水源距离、信号、日照等），名次表会自动按得分排序并给出 A/B/C 等级。"
         action-text="新增营位"
         :hint="`因子维度共 ${FACTOR_META.length} 项，全部可在评分页调整权重`"
         @action="router.push('/sites/new')"
       />
+      <el-alert
+        v-else
+        type="warning"
+        show-icon
+        :closable="false"
+        title="当前没有在有效期内的营位"
+        :description="`全部营位的现场实测都已超过 ${reviewDays} 天复评时效，本批比较为空。请补录新一轮实测后再查看名次。`"
+      />
+    </section>
+
+    <section v-if="pending.length" class="panel" data-testid="pending-panel">
+      <div class="panel__head">
+        <h2>待复评营位（{{ pending.length }}）</h2>
+        <span class="weight-note">
+          现场实测超 {{ reviewDays }} 天未复评，已退出本批比较，不参与重新归一、不占名次与 A 级数量
+        </span>
+      </div>
+      <el-table :data="pending" row-class-name="pending-row" size="default" border>
+        <el-table-column label="营位" min-width="210">
+          <template #default="{ row }">
+            <div class="site-cell">
+              <el-link type="primary" underline="never" @click="openDetail(row.site.id)">
+                {{ row.site.code }} · {{ row.site.name }}
+              </el-link>
+              <span class="site-cell__sub">
+                {{ row.site.campName }} · 海拔 {{ row.site.elevation }} m · 容 {{ row.site.tentCapacity }} 帐
+              </span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="地表 / 进出" width="130">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain">{{ row.site.surface }}</el-tag>
+            <el-tag size="small" effect="plain" type="info" class="ml6">{{ row.site.access }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="最近实测" width="150">
+          <template #default="{ row }">
+            {{ row.freshness.assessedAt }}
+            <div class="cell-sub">{{ row.freshness.daysLeft != null ? `已超 ${-(row.freshness.daysLeft)} 天` : '—' }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="220">
+          <template #default="{ row }">
+            <FreshnessBadge :freshness="row.freshness" :review-days="reviewDays" />
+          </template>
+        </el-table-column>
+        <el-table-column label="说明" min-width="220">
+          <template #default>
+            <span class="muted">补录新一轮现场实测后立即回到本批比较，待复评标记自动清除</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="120" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" text type="primary" @click="openDetail(row.site.id)">去复评</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
     </section>
   </div>
 </template>
@@ -306,5 +382,9 @@ function openDetail(siteId: number | undefined): void {
 }
 .mr6 {
   margin-right: 6px;
+}
+:deep(.pending-row) {
+  background: #f3f4f6 !important;
+  color: var(--gb-muted);
 }
 </style>
