@@ -2,6 +2,7 @@
 /**
  * `/` 营位名次表 —— 按综合得分从高到低排序，展示坡度、水源距离、信号与等级，
  * 可按营地 / 地表类型 / 进出方式筛选，命中否决项的营位整行标红。
+ * 实测超期（超过当前方案复评时效）的营位退出本批比较，单独列入「待复评」。
  * 消费 Campsite、FactorAssessment、RiskVeto；复用 <GradeBadge>、<EmptyState>。
  */
 import { computed } from 'vue'
@@ -14,7 +15,7 @@ import { FACTOR_META } from '@/types/score'
 import { SURFACE_TYPES, ACCESS_MODES } from '@/types/campsite'
 import GradeBadge from '@/components/common/GradeBadge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import { formatScore } from '@/utils/format'
+import { formatDate, formatScore } from '@/utils/format'
 import { NORMALIZE_LABELS } from '@/types/score'
 
 const router = useRouter()
@@ -36,13 +37,14 @@ const inputSites = computed(() =>
   })
 )
 
-const { ranked } = useRanking({
+const { ranked, stale } = useRanking({
   sites: () => inputSites.value,
   factorOf: (siteId: number) => siteStore.latestFactor(siteId),
   weights: () => profileStore.activeWeights,
   normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
   thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
-  vetoedIds: () => uiStore.vetoedSiteIds
+  vetoedIds: () => uiStore.vetoedSiteIds,
+  reviewValidDays: () => profileStore.activeProfile?.reviewValidDays ?? 30
 })
 
 const factorMetaOf = (key: string) => FACTOR_META.find((m) => m.key === key)
@@ -66,6 +68,7 @@ const stats = computed(() => {
     total: rows.length,
     gradeA: rows.filter((r) => r.grade === 'A').length,
     vetoed: rows.filter((r) => r.vetoed).length,
+    stale: stale.value.length,
     top: rows[0]?.total ?? 0,
     topName: rows[0] ? `${rows[0].site.code} ${rows[0].site.name}` : '—'
   }
@@ -75,6 +78,7 @@ const activeProfileName = computed(() => profileStore.activeProfile?.name ?? '�
 const activeNormalize = computed(() =>
   profileStore.activeProfile ? NORMALIZE_LABELS[profileStore.activeProfile.normalize] : '—'
 )
+const activeValidDays = computed(() => profileStore.activeProfile?.reviewValidDays ?? 30)
 
 function openDetail(siteId: number | undefined): void {
   if (typeof siteId !== 'number') return
@@ -88,8 +92,8 @@ function openDetail(siteId: number | undefined): void {
       <div class="page-head__title">
         <h1>营位名次表</h1>
         <p>
-          按当前权重方案对全部候选营位加权求和后降序排列，实时给出 A/B/C 推荐等级；
-          命中风险否决项的营位整行标红并自动降为 C 级。
+          按当前权重方案对实测在时效内的营位加权求和后降序排列，实时给出 A/B/C 推荐等级；
+          命中风险否决项的营位整行标红并自动降为 C 级；实测超期的营位退出比较并列入待复评。
         </p>
       </div>
       <div class="page-actions">
@@ -101,7 +105,7 @@ function openDetail(siteId: number | undefined): void {
 
     <div class="stat-row">
       <div class="stat-card">
-        <div class="stat-card__label">候选营位</div>
+        <div class="stat-card__label">参与比较</div>
         <div class="stat-card__value" data-testid="stat-total">{{ stats.total }}</div>
         <div class="stat-card__extra">共 {{ siteStore.total }} 个已登记</div>
       </div>
@@ -109,6 +113,17 @@ function openDetail(siteId: number | undefined): void {
         <div class="stat-card__label">A 级推荐</div>
         <div class="stat-card__value">{{ stats.gradeA }}</div>
         <div class="stat-card__extra">阈值来自当前方案</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card__label">待复评</div>
+        <div
+          class="stat-card__value"
+          data-testid="stat-stale"
+          :style="{ color: stats.stale ? '#6b7280' : undefined }"
+        >
+          {{ stats.stale }}
+        </div>
+        <div class="stat-card__extra">实测超 {{ activeValidDays }} 天退出比较</div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">命中否决</div>
@@ -128,7 +143,8 @@ function openDetail(siteId: number | undefined): void {
       <div class="panel__head">
         <h2>筛选条件</h2>
         <span class="weight-note">
-          当前方案：{{ activeProfileName }} · 归一方式：{{ activeNormalize }}
+          当前方案：{{ activeProfileName }} · 归一方式：{{ activeNormalize }} · 复评时效
+          {{ activeValidDays }} 天
         </span>
       </div>
       <div class="filters">
@@ -255,13 +271,81 @@ function openDetail(siteId: number | undefined): void {
       </el-table>
 
       <EmptyState
-        v-else
+        v-else-if="!stale.length"
         title="还没有可评估的营位"
         description="先登记候选营位并录入因子（坡度、水源距离、信号、日照等），名次表会自动按得分排序并给出 A/B/C 等级。"
         action-text="新增营位"
         :hint="`因子维度共 ${FACTOR_META.length} 项，全部可在评分页调整权重`"
         @action="router.push('/sites/new')"
       />
+      <EmptyState
+        v-else
+        title="本批没有实测在时效内的营位"
+        :description="`全部 ${stale.length} 个营位的实测读数都已超过 ${activeValidDays} 天时效，已退出比较并列入下方待复评；到详情页补录新一轮实测后立即回到名次表。`"
+        action-text="去复评"
+        hint="复评时效由当前权重方案决定，可在「权重与评分」调整"
+        @action="openDetail(stale[0]?.siteId)"
+      />
+    </section>
+
+    <section v-if="stale.length" class="panel">
+      <div class="panel__head">
+        <h2>待复评营位</h2>
+        <span class="weight-note">
+          实测读数超过 {{ activeValidDays }} 天时效，已退出本批比较；补录新一轮实测后立即回到名次表
+        </span>
+      </div>
+      <el-table data-testid="stale-table" :data="stale" size="small" border stripe>
+        <el-table-column label="状态" width="96" align="center">
+          <template #default>
+            <el-tag type="info" size="small" effect="plain">待复评</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="营位" min-width="210">
+          <template #default="{ row }">
+            <div class="site-cell">
+              <el-link type="primary" underline="never" @click="openDetail(row.siteId)">
+                {{ row.site.code }} · {{ row.site.name }}
+              </el-link>
+              <span class="site-cell__sub">{{ row.site.campName }} · {{ row.site.surface }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="最近实测" width="120" align="center">
+          <template #default="{ row }">
+            {{ row.assessedAt ? formatDate(row.assessedAt) : '从未评估' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="超期" width="110" align="right">
+          <template #default="{ row }">
+            <span v-if="row.assessedAt" class="overdue">超 {{ row.overdueDays }} 天</span>
+            <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="否决项" min-width="160">
+          <template #default="{ row }">
+            <template v-if="row.vetoed">
+              <el-tag
+                v-for="v in uiStore.vetosOf(row.siteId)"
+                :key="v.id"
+                type="danger"
+                size="small"
+                class="mr6"
+              >
+                {{ v.type }}
+              </el-tag>
+            </template>
+            <span v-else class="muted">无</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="120" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" text type="primary" @click="openDetail(row.siteId)">
+              去复评
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
     </section>
   </div>
 </template>
@@ -299,6 +383,11 @@ function openDetail(siteId: number | undefined): void {
 .total-score {
   font-size: 15px;
   color: var(--gb-accent-strong);
+  font-variant-numeric: tabular-nums;
+}
+.overdue {
+  color: #b45309;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 .ml6 {

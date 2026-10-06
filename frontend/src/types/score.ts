@@ -42,6 +42,11 @@ export interface ScoreProfile {
   thresholds: GradeThresholds
   /** 适用季节 */
   season: string
+  /**
+   * 复评时效（天）：营位最新一轮实测距今超过该天数即视为超期，
+   * 退出本批比较并标记「待复评」，补录新一轮实测后自动回到比较。
+   */
+  reviewValidDays: number
   /** 是否为当前启用方案 */
   active: boolean
   note: string
@@ -115,6 +120,15 @@ export const DEFAULT_WEIGHTS: FactorWeights = {
 }
 
 export const SEASONS: string[] = ['春季', '夏季', '秋季', '冬季', '四季通用']
+
+/** 复评时效默认口径：雨季（夏季）两周，旱季（其余季节）一个月 */
+export const REVIEW_VALID_DAYS_RAINY = 14
+export const REVIEW_VALID_DAYS_DRY = 30
+
+/** 按适用季节给出复评时效默认值；雨季实测读数变质快，时效更短。 */
+export function defaultReviewValidDays(season: string): number {
+  return season === '夏季' ? REVIEW_VALID_DAYS_RAINY : REVIEW_VALID_DAYS_DRY
+}
 
 export const NORMALIZE_LABELS: Record<NormalizeMethod, string> = {
   minmax: '极差归一',

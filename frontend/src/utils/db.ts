@@ -5,17 +5,18 @@
  *   v1 建 sites / factors 两张表
  *   v2 新增 profiles 表，并为 factors 补 siteId 索引
  *   v3 新增 vetos 表，并为存量营位回填默认权重方案
+ *   v4 为存量权重方案回填复评时效（reviewValidDays，按季节取默认口径）
  */
 import Dexie, { type Table } from 'dexie'
 import type { Campsite } from '@/types/campsite'
 import type { FactorAssessment } from '@/types/factor'
 import type { ScoreProfile } from '@/types/score'
-import { DEFAULT_WEIGHTS } from '@/types/score'
+import { DEFAULT_WEIGHTS, defaultReviewValidDays } from '@/types/score'
 import type { RiskVeto } from '@/types/veto'
 
 export const DB_NAME = 'gbcampsite-db'
 /** 当前数据结构版本号 */
-export const DB_VERSION = 3
+export const DB_VERSION = 4
 
 export class GbCampsiteDatabase extends Dexie {
   sites!: Table<Campsite, number>
@@ -53,7 +54,7 @@ export class GbCampsiteDatabase extends Dexie {
       })
 
     // v3：新增风险否决表；为存量营位回填默认方案 id 与新增字段缺省值
-    this.version(DB_VERSION)
+    this.version(3)
       .stores({
         sites: '++id, code, name, campName, surface, access, defaultProfileId, updatedAt',
         factors: '++id, siteId, assessedAt, assessor',
@@ -74,6 +75,18 @@ export class GbCampsiteDatabase extends Dexie {
             if (typeof s.tentCapacity !== 'number') s.tentCapacity = 1
           })
       })
+
+    // v4：为存量权重方案回填复评时效——没有时效设置的按默认口径（雨季 14 天 / 旱季 30 天）补齐
+    this.version(DB_VERSION).upgrade(async (tx) => {
+      await tx
+        .table('profiles')
+        .toCollection()
+        .modify((p: Partial<ScoreProfile>) => {
+          if (typeof p.reviewValidDays !== 'number' || !(p.reviewValidDays > 0)) {
+            p.reviewValidDays = defaultReviewValidDays(p.season ?? '四季通用')
+          }
+        })
+    })
   }
 }
 
@@ -94,6 +107,13 @@ export async function initDatabase(): Promise<void> {
 
 const SEED_TS = '2024-04-12T02:30:00.000Z'
 
+/** 相对今天的日期（YYYY-MM-DD），让样例评估一部分在时效内、一部分已超期 */
+function daysAgo(n: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() - n)
+  return d.toISOString().slice(0, 10)
+}
+
 function seedProfiles(): ScoreProfile[] {
   return [
     {
@@ -103,6 +123,7 @@ function seedProfiles(): ScoreProfile[] {
       normalize: 'minmax',
       thresholds: { gradeA: 78, gradeB: 58 },
       season: '四季通用',
+      reviewValidDays: defaultReviewValidDays('四季通用'),
       active: true,
       note: '默认方案，坡度、水源、落石三项权重略高，适用于大多数山谷营地。',
       createdAt: SEED_TS,
@@ -127,6 +148,7 @@ function seedProfiles(): ScoreProfile[] {
       normalize: 'threshold',
       thresholds: { gradeA: 82, gradeB: 62 },
       season: '夏季',
+      reviewValidDays: defaultReviewValidDays('夏季'),
       active: false,
       note: '雨季强调风力遮蔽与水系距离，阈值分段避免极差归一被单个离群营位拉偏。',
       createdAt: SEED_TS,
@@ -249,6 +271,7 @@ function seedSites(): Campsite[] {
 }
 
 function seedFactors(): FactorAssessment[] {
+  // assessedAt 取相对今天的日期：4 个营位在时效内参与比较，2 个已超期进入「待复评」
   const rows: Array<Omit<FactorAssessment, 'createdAt' | 'updatedAt'>> = [
     {
       id: 1,
@@ -263,7 +286,7 @@ function seedFactors(): FactorAssessment[] {
       distanceToCar: 12,
       distanceToTrail: 40,
       assessor: '李营',
-      assessedAt: '2024-04-06'
+      assessedAt: daysAgo(6)
     },
     {
       id: 2,
@@ -278,7 +301,7 @@ function seedFactors(): FactorAssessment[] {
       distanceToCar: 260,
       distanceToTrail: 35,
       assessor: '李营',
-      assessedAt: '2024-04-06'
+      assessedAt: daysAgo(12)
     },
     {
       id: 3,
@@ -293,7 +316,7 @@ function seedFactors(): FactorAssessment[] {
       distanceToCar: 30,
       distanceToTrail: 120,
       assessor: '周勘',
-      assessedAt: '2024-04-08'
+      assessedAt: daysAgo(18)
     },
     {
       id: 4,
@@ -308,7 +331,7 @@ function seedFactors(): FactorAssessment[] {
       distanceToCar: 480,
       distanceToTrail: 60,
       assessor: '周勘',
-      assessedAt: '2024-04-08'
+      assessedAt: daysAgo(41)
     },
     {
       id: 5,
@@ -323,7 +346,7 @@ function seedFactors(): FactorAssessment[] {
       distanceToCar: 340,
       distanceToTrail: 25,
       assessor: '陈巡',
-      assessedAt: '2024-04-10'
+      assessedAt: daysAgo(24)
     },
     {
       id: 6,
@@ -338,7 +361,7 @@ function seedFactors(): FactorAssessment[] {
       distanceToCar: 55,
       distanceToTrail: 90,
       assessor: '陈巡',
-      assessedAt: '2024-04-10'
+      assessedAt: daysAgo(55)
     }
   ]
   return rows.map((r) => ({ ...r, createdAt: SEED_TS, updatedAt: SEED_TS }))

@@ -40,20 +40,23 @@ const visibleSites = computed(() =>
   })
 )
 
-const { ranked, scoreOf } = useRanking({
+const { ranked, stale, scoreOf, isStale } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
   weights: () => profileStore.activeWeights,
   normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
   thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
-  vetoedIds: () => uiStore.vetoedSiteIds
+  vetoedIds: () => uiStore.vetoedSiteIds,
+  reviewValidDays: () => profileStore.activeProfile?.reviewValidDays ?? 30
 })
 
 const panelSites = computed(() =>
   visibleSites.value.filter((s) => {
     if (!gradeFilter.value) return true
-    const grade = s.id != null ? scoreOf(s.id)?.grade : undefined
-    return grade === gradeFilter.value
+    if (s.id == null) return false
+    if (gradeFilter.value === 'stale') return isStale(s.id)
+    if (isStale(s.id)) return false
+    return scoreOf(s.id)?.grade === gradeFilter.value
   })
 )
 
@@ -63,6 +66,16 @@ const selectedSite = computed(() =>
 
 const selectedRow = computed(() =>
   selectedId.value == null ? null : scoreOf(selectedId.value)
+)
+
+/** 选中营位是否超期待复评，及其超期明细 */
+const selectedStale = computed(() =>
+  selectedId.value == null ? false : isStale(selectedId.value)
+)
+const selectedStaleRow = computed(() =>
+  selectedId.value == null
+    ? null
+    : stale.value.find((r) => r.siteId === selectedId.value) ?? null
 )
 
 const selectedVetos = computed(() => uiStore.vetosOf(selectedId.value))
@@ -101,7 +114,8 @@ const gradeStats = computed(() => {
   return [
     { grade: 'A' as const, count: rows.filter((r) => r.grade === 'A').length, color: '#15803d' },
     { grade: 'B' as const, count: rows.filter((r) => r.grade === 'B').length, color: '#d97706' },
-    { grade: 'C' as const, count: rows.filter((r) => r.grade === 'C').length, color: '#b91c1c' }
+    { grade: 'C' as const, count: rows.filter((r) => r.grade === 'C').length, color: '#b91c1c' },
+    { grade: '待' as const, count: stale.value.length, color: '#6b7280' }
   ]
 })
 </script>
@@ -112,7 +126,7 @@ const gradeStats = computed(() => {
       <div class="page-head__title">
         <h1>营位地图</h1>
         <p>
-          按推荐等级给营位标记着色，命中风险否决项的营位以红点提示；
+          按推荐等级给营位标记着色，命中风险否决项的营位以红点提示，实测超期的营位染灰标记「待」；
           点击任一标记可查看该营位的得分构成、因子实测与否决记录。
         </p>
       </div>
@@ -140,9 +154,11 @@ const gradeStats = computed(() => {
 
     <div class="stat-row">
       <div v-for="g in gradeStats" :key="g.grade" class="stat-card">
-        <div class="stat-card__label">{{ g.grade }} 级营位</div>
+        <div class="stat-card__label">{{ g.grade === '待' ? '待复评' : `${g.grade} 级营位` }}</div>
         <div class="stat-card__value" :style="{ color: g.color }">{{ g.count }}</div>
-        <div class="stat-card__extra">共 {{ ranked.length }} 个候选营位</div>
+        <div class="stat-card__extra">
+          {{ g.grade === '待' ? '实测超期退出比较' : `共 ${ranked.length} 个参与比较` }}
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">否决标记</div>
@@ -170,6 +186,7 @@ const gradeStats = computed(() => {
           <el-radio-button value="A">A 级</el-radio-button>
           <el-radio-button value="B">B 级</el-radio-button>
           <el-radio-button value="C">C 级</el-radio-button>
+          <el-radio-button value="stale">待复评</el-radio-button>
         </el-radio-group>
         <el-button
           text
@@ -190,6 +207,7 @@ const gradeStats = computed(() => {
       :sites="panelSites"
       :selected-id="selectedId"
       :grade-of="gradeOfSite"
+      :stale-of="isStale"
       height="460px"
       title="营位分布与等级着色"
       @select="selectSite"
@@ -211,10 +229,24 @@ const gradeStats = computed(() => {
         <h2>{{ selectedSite.code }} · {{ selectedSite.name }}</h2>
         <GradeBadge
           :grade="selectedRow?.grade ?? 'C'"
-          :score="selectedRow?.total"
+          :score="selectedStale ? undefined : selectedRow?.total"
           :vetoed="selectedVetos.length > 0"
+          :stale="selectedStale"
         />
       </div>
+      <el-alert
+        v-if="selectedStale"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="stale-alert"
+        :title="
+          selectedStaleRow?.assessedAt
+            ? `实测读数已超期 ${selectedStaleRow.overdueDays} 天（最近评估 ${formatDate(selectedStaleRow.assessedAt)}），已退出本批比较`
+            : '该营位还没有实测评估记录，未参与本批比较'
+        "
+        description="到详情页补录新一轮实测后，该营位立即回到比较并恢复等级着色。"
+      />
       <div class="detail-grid">
         <div class="detail-item">
           <span class="detail-item__label">所属营地</span>
@@ -307,6 +339,9 @@ const gradeStats = computed(() => {
   gap: 6px;
   flex-wrap: wrap;
   margin-top: 10px;
+}
+.stale-alert {
+  margin-bottom: 10px;
 }
 .mr6 {
   margin-right: 6px;

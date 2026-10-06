@@ -20,13 +20,14 @@ const siteStore = useSiteStore()
 const profileStore = useProfileStore()
 const uiStore = useUiStore()
 
-const { scoreOf } = useRanking({
+const { scoreOf, isStale } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
   weights: () => profileStore.activeWeights,
   normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
   thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
-  vetoedIds: () => uiStore.vetoedSiteIds
+  vetoedIds: () => uiStore.vetoedSiteIds,
+  reviewValidDays: () => profileStore.activeProfile?.reviewValidDays ?? 30
 })
 
 const form = reactive({
@@ -70,6 +71,7 @@ const vetoLedger = computed(() =>
         siteCode: site?.code ?? '—',
         siteName: site?.name ?? '营位已删除',
         campName: site?.campName ?? '—',
+        stale: isStale(v.siteId),
         grade: row?.grade ?? 'C',
         total: row?.total ?? 0
       }
@@ -225,7 +227,13 @@ function focusSite(id: number | undefined): void {
         <div class="panel__head">
           <h2>选中营位预览</h2>
           <GradeBadge
-            v-if="selectedRow"
+            v-if="selectedSite && form.siteId != null && isStale(form.siteId)"
+            grade="C"
+            stale
+            :show-label="true"
+          />
+          <GradeBadge
+            v-else-if="selectedRow"
             :grade="selectedRow.grade"
             :score="selectedRow.total"
             :vetoed="selectedVetos.length > 0"
@@ -300,7 +308,21 @@ function focusSite(id: number | undefined): void {
         </el-table-column>
         <el-table-column label="当前等级" width="170">
           <template #default="{ row }">
-            <GradeBadge :grade="row.grade" :score="row.total" vetoed size="small" :show-label="false" />
+            <GradeBadge
+              v-if="row.stale"
+              grade="C"
+              stale
+              size="small"
+              :show-label="false"
+            />
+            <GradeBadge
+              v-else
+              :grade="row.grade"
+              :score="row.total"
+              vetoed
+              size="small"
+              :show-label="false"
+            />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="150" fixed="right">

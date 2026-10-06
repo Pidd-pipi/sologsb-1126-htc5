@@ -7,7 +7,7 @@ import { defineStore } from 'pinia'
 import { db, toPlain } from '@/utils/db'
 import type { RiskVeto } from '@/types/veto'
 import type { FactorWeights, NormalizeMethod, GradeThresholds } from '@/types/score'
-import { DEFAULT_WEIGHTS } from '@/types/score'
+import { DEFAULT_WEIGHTS, defaultReviewValidDays } from '@/types/score'
 import type { AccessMode, SurfaceType } from '@/types/campsite'
 import { nowIso, todayIso } from '@/utils/format'
 
@@ -26,6 +26,8 @@ export const useUiStore = defineStore('ui', () => {
   const workingNormalize = ref<NormalizeMethod>('minmax')
   const workingThresholds = ref<GradeThresholds>({ gradeA: 78, gradeB: 58 })
   const workingSeason = ref<string>('四季通用')
+  /** 评分页临时复评时效（天），跟随启用方案同步 */
+  const workingReviewValidDays = ref<number>(defaultReviewValidDays('四季通用'))
   const dirty = ref(false)
 
   /** 地图页当前选中的营位 id */
@@ -79,12 +81,17 @@ export const useUiStore = defineStore('ui', () => {
     weights: FactorWeights,
     normalize: NormalizeMethod,
     thresholds: GradeThresholds,
-    season: string
+    season: string,
+    reviewValidDays?: number
   ): void {
     workingWeights.value = { ...DEFAULT_WEIGHTS, ...weights }
     workingNormalize.value = normalize
     workingThresholds.value = { ...thresholds }
     workingSeason.value = season
+    workingReviewValidDays.value =
+      typeof reviewValidDays === 'number' && reviewValidDays > 0
+        ? reviewValidDays
+        : defaultReviewValidDays(season)
     dirty.value = false
   }
 
@@ -109,6 +116,7 @@ export const useUiStore = defineStore('ui', () => {
     workingNormalize,
     workingThresholds,
     workingSeason,
+    workingReviewValidDays,
     dirty,
     focusedSiteId,
     vetoedSiteIds,

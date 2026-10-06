@@ -39,8 +39,17 @@ docker compose down
 | --- | --- | --- |
 | Campsite 营位 | `frontend/src/types/campsite.ts` | 营位编号、名称、所属营地、经纬度、海拔、坡度、坡向、地表类型、可容帐篷数、平整度评分、进出方式、默认方案 |
 | FactorAssessment 因子评估 | `frontend/src/types/factor.ts` | 所属营位、水源距离、风向与风力等级、信号强度、日照时长、落石落枝风险、植被遮蔽度、离车距离、离步道距离、评估人、评估日期 |
-| ScoreProfile 权重方案 | `frontend/src/types/score.ts` | 方案名、各因子权重（0-100）、归一化方式（极差归一 / 阈值分段）、A/B/C 等级阈值、适用季节、是否启用 |
+| ScoreProfile 权重方案 | `frontend/src/types/score.ts` | 方案名、各因子权重（0-100）、归一化方式（极差归一 / 阈值分段）、A/B/C 等级阈值、适用季节、复评时效（天）、是否启用 |
 | RiskVeto 风险否决项 | `frontend/src/types/veto.ts` | 营位 id、否决类型（河道内 / 山洪沟 / 孤树下 / 崖底落石区 / 陡坡）、说明、判定人、判定日期 |
+
+### 复评时效（实测读数的保质期）
+
+营位靠现场实测打分，而读数会随季节天气失效。每套权重方案带 `reviewValidDays`（复评时效，天），默认口径：**雨季（夏季）14 天、旱季（其余季节）30 天**，可在「权重与评分」按方案调整。
+
+- 营位最新一轮实测距今超过时效 → **退出本批比较**，其余营位按同一口径重新归一，名次、等级、地图颜色与 A 级数量一起更新；
+- 超期未复评的营位在名次表下方单列「待复评」，地图上染灰并标记「待」，详情页给出超期提示；
+- 补录新一轮实测（评估日期回到时效内）→ **立即回到比较**，待复评标记随之清除；
+- 从未录入实测的营位同样视为待复评。
 
 ### IndexedDB 版本与升级迁移
 
@@ -49,23 +58,24 @@ docker compose down
 - **v1**：建立 `sites`（营位）与 `factors`（因子评估）两张表。
 - **v2**：新增 `profiles`（权重方案）表，并为 `factors` 补 `siteId` 索引，让「按营位取因子」走索引；同时为存量因子补齐 `shade`、`distanceToCar`、`distanceToTrail` 缺省值。
 - **v3**：新增 `vetos`（风险否决）表，并为存量营位回填 `defaultProfileId`（取当前启用方案的 id）与新增字段缺省值。
+- **v4**：为存量权重方案回填 `reviewValidDays`（复评时效）——旧数据没有时效设置时按默认口径回填（雨季 14 天 / 旱季 30 天）。
 
 ## 四、页面与路由
 
 | 路由 | 页面 | 消费模型 |
 | --- | --- | --- |
-| `/` | 营位名次表（按综合得分降序，展示坡度、水源距离、信号与等级，可按营地/地表/进出方式筛选，命中否决项整行标红） | Campsite、FactorAssessment、RiskVeto |
+| `/` | 营位名次表（实测在时效内的营位按综合得分降序，展示坡度、水源距离、信号与等级，可按营地/地表/进出方式筛选，命中否决项整行标红；超期营位退出比较并单列「待复评」） | Campsite、FactorAssessment、RiskVeto |
 | `/sites/new` | 新增营位（地图点选或手填经纬度，录入海拔、坡度、坡向与容量，支持草稿保存） | Campsite、FactorAssessment |
-| `/sites/:id` | 营位详情（上部地图定位与基本信息，中部因子打分表，下部否决记录与多轮复核） | 四个模型 |
-| `/scoring` | 权重与评分（拖动各因子权重条，名次实时刷新，可另存为季节方案） | ScoreProfile、Campsite |
-| `/map` | 营位地图（高德 JS API 标记按等级着色，未配置 `VITE_AMAP_KEY` 时退化为本地 SVG 网格视图） | Campsite、RiskVeto |
+| `/sites/:id` | 营位详情（上部地图定位与基本信息，中部因子打分表，下部否决记录与多轮复核；超期营位显示待复评提示，补录实测后立即回到比较） | 四个模型 |
+| `/scoring` | 权重与评分（拖动各因子权重条，名次实时刷新；可调整复评时效并另存为季节方案） | ScoreProfile、Campsite |
+| `/map` | 营位地图（高德 JS API 标记按等级着色，超期营位染灰标记「待」，未配置 `VITE_AMAP_KEY` 时退化为本地 SVG 网格视图） | Campsite、RiskVeto |
 | `/veto` | 风险否决登记（选营位与否决类型、填说明，提交后名次表与地图同步更新） | RiskVeto、Campsite |
 
 ## 五、共享组件与 hooks / utils
 
 - 组件：`frontend/src/components/common/` 下的 `MapPanel.vue`（高德 + SVG 网格双模式）、`FactorScoreBar.vue`（原始值 / 归一化得分 / 权重占比）、`GradeBadge.vue`（A/B/C 等级与得分气泡）、`EmptyState.vue`（空态与新建入口）、`WeightEditor.vue`（权重条编辑器）
-- hooks：`frontend/src/hooks/useAmapLoader.ts`（按需注入高德 JS API，key 缺省或加载失败返回降级标记）、`useRanking.ts`（归一化得分与名次）、`useLocalDraft.ts`（表单草稿）
-- utils：`frontend/src/utils/score.ts`（极差归一、阈值分段、加权求和、等级阈值、否决短路）、`geo.ts`（经纬度距离与网格坐标换算）、`format.ts`（数值与日期格式化、流水编号）、`db.ts`（Dexie 封装与样例数据）、`draft.ts`（localStorage 草稿）
+- hooks：`frontend/src/hooks/useAmapLoader.ts`（按需注入高德 JS API，key 缺省或加载失败返回降级标记）、`useRanking.ts`（时效分流、归一化得分与名次）、`useLocalDraft.ts`（表单草稿）
+- utils：`frontend/src/utils/score.ts`（极差归一、阈值分段、加权求和、等级阈值、否决短路）、`review.ts`（复评时效判定与待复评状态）、`geo.ts`（经纬度距离与网格坐标换算）、`format.ts`（数值与日期格式化、流水编号）、`db.ts`（Dexie 封装与样例数据）、`draft.ts`（localStorage 草稿）
 
 ## 六、地图降级说明
 
@@ -95,7 +105,7 @@ sologsb-1126/
         ├── hooks/{useAmapLoader,useRanking,useLocalDraft}.ts
         ├── pages/{Ranking,SiteNew,SiteDetail,Scoring,MapView,Veto}.vue
         ├── router/index.ts
-        ├── utils/{score,geo,format,db,draft}.ts
+        ├── utils/{score,review,geo,format,db,draft}.ts
         ├── styles/main.css
         ├── App.vue
         └── main.ts

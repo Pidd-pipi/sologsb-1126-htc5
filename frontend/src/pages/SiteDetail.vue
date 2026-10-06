@@ -34,16 +34,22 @@ const uiStore = useUiStore()
 const siteId = computed(() => Number(route.params.id))
 const site = computed(() => siteStore.byId(siteId.value))
 
-const { scoreOf } = useRanking({
+const { scoreOf, stale, isStale } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
   weights: () => profileStore.activeWeights,
   normalize: () => profileStore.activeProfile?.normalize ?? 'minmax',
   thresholds: () => profileStore.activeProfile?.thresholds ?? { gradeA: 78, gradeB: 58 },
-  vetoedIds: () => uiStore.vetoedSiteIds
+  vetoedIds: () => uiStore.vetoedSiteIds,
+  reviewValidDays: () => profileStore.activeProfile?.reviewValidDays ?? 30
 })
 
 const scoreRow = computed(() => scoreOf(siteId.value))
+
+/** 当前营位是否超期待复评，及其超期明细 */
+const staleRow = computed(() => stale.value.find((r) => r.siteId === siteId.value) ?? null)
+const siteStale = computed(() => isStale(siteId.value))
+const activeValidDays = computed(() => profileStore.activeProfile?.reviewValidDays ?? 30)
 
 /** 供 MapPanel 与地图标记回调使用（避免在模板里写带类型标注的箭头函数） */
 function gradeOfSite(id: number): Grade {
@@ -92,6 +98,8 @@ function prefillFactor(): void {
 
 async function submitFactor(): Promise<void> {
   if (!site.value) return
+  // 先记下提交前是否待复评：补录后最新实测回到时效内，标记会自动清除
+  const wasStale = siteStale.value
   try {
     await siteStore.addFactor({
       siteId: siteId.value,
@@ -110,7 +118,11 @@ async function submitFactor(): Promise<void> {
       updatedAt: ''
     })
     showFactorForm.value = false
-    ElMessage.success('已追加一轮因子评估，名次与等级同步刷新')
+    ElMessage.success(
+      wasStale
+        ? '已补录新一轮实测，该营位立即回到比较，待复评标记已清除'
+        : '已追加一轮因子评估，名次与等级同步刷新'
+    )
   } catch (err) {
     ElMessage.error(`追加失败：${err instanceof Error ? err.message : String(err)}`)
   }
@@ -259,10 +271,25 @@ watch(
       :description="vetoList.map((v) => `${v.type}：${v.description}`).join(' ｜ ')"
     />
 
+    <el-alert
+      v-if="siteStale"
+      type="warning"
+      show-icon
+      :closable="false"
+      class="stale-alert"
+      :title="
+        staleRow?.assessedAt
+          ? `实测读数已超期 ${staleRow.overdueDays} 天（最近评估 ${formatDate(staleRow.assessedAt)}，时效 ${activeValidDays} 天），该营位已退出本批名次比较`
+          : '该营位还没有实测评估记录，未参与本批名次比较'
+      "
+      description="在下方「多轮因子复核」补录新一轮实测后，该营位立即回到比较，待复评标记随之清除。"
+    />
+
     <MapPanel
       :sites="siteStore.list"
       :selected-id="siteId"
       :grade-of="gradeOfSite"
+      :stale-of="isStale"
       height="360px"
       :title="`营位定位 · ${site.code}`"
       @select="openSite"
@@ -271,15 +298,22 @@ watch(
     <div class="stat-row">
       <div class="stat-card">
         <div class="stat-card__label">综合得分</div>
-        <div class="stat-card__value">{{ scoreRow?.total ?? '—' }}</div>
+        <div class="stat-card__value">{{ siteStale ? '—' : (scoreRow?.total ?? '—') }}</div>
         <div class="stat-card__extra">方案 {{ profileStore.activeProfile?.name ?? '—' }}</div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">推荐等级</div>
         <div class="stat-card__value">
-          <GradeBadge :grade="grade" size="large" :vetoed="vetoList.length > 0" />
+          <GradeBadge
+            :grade="grade"
+            size="large"
+            :vetoed="vetoList.length > 0"
+            :stale="siteStale"
+          />
         </div>
-        <div class="stat-card__extra">名次第 {{ scoreRow?.rank ?? '—' }} 位</div>
+        <div class="stat-card__extra">
+          {{ siteStale ? '待复评 · 已退出比较' : `名次第 ${scoreRow?.rank ?? '—'} 位` }}
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">坐标</div>
@@ -289,7 +323,9 @@ watch(
       <div class="stat-card">
         <div class="stat-card__label">评估轮次</div>
         <div class="stat-card__value">{{ factorHistory.length }}</div>
-        <div class="stat-card__extra">否决项 {{ vetoList.length }} 条</div>
+        <div class="stat-card__extra">
+          否决项 {{ vetoList.length }} 条 · 时效 {{ activeValidDays }} 天
+        </div>
       </div>
     </div>
 
@@ -379,32 +415,42 @@ watch(
         <span class="weight-note">
           归一方式：{{ profileStore.activeProfile ? NORMALIZE_LABELS[profileStore.activeProfile.normalize] : '—' }}
           · 等级阈值 A ≥ {{ profileStore.activeProfile?.thresholds.gradeA ?? 78 }} / B ≥
-          {{ profileStore.activeProfile?.thresholds.gradeB ?? 58 }}
+          {{ profileStore.activeProfile?.thresholds.gradeB ?? 58 }} · 复评时效 {{ activeValidDays }} 天
         </span>
       </div>
-      <div class="factor-grid">
-        <FactorScoreBar
-          v-for="row in factorRows"
-          :key="row.key"
-          :factor-key="row.key"
-          :label="row.label"
-          :raw="row.raw"
-          :normalized="row.normalized"
-          :weight="row.weight"
-          :weight-ratio="row.weightRatio"
-          :higher-is-better="row.higherIsBetter"
-          :contribution="row.contribution"
-        />
-      </div>
-      <p class="panel__hint">
-        当前名次所用因子来自最新一轮评估（{{ siteStore.latestFactor(siteId)?.assessedAt ?? '暂无' }}，
-        评估人 {{ siteStore.latestFactor(siteId)?.assessor ?? '—' }}）。
+      <p v-if="siteStale" class="panel__hint">
+        该营位实测已超期（待复评），当前不参与归一化与排名；补录新一轮实测后，这里会立即展示最新得分构成。
       </p>
+      <template v-else>
+        <div class="factor-grid">
+          <FactorScoreBar
+            v-for="row in factorRows"
+            :key="row.key"
+            :factor-key="row.key"
+            :label="row.label"
+            :raw="row.raw"
+            :normalized="row.normalized"
+            :weight="row.weight"
+            :weight-ratio="row.weightRatio"
+            :higher-is-better="row.higherIsBetter"
+            :contribution="row.contribution"
+          />
+        </div>
+        <p class="panel__hint">
+          当前名次所用因子来自最新一轮评估（{{ siteStore.latestFactor(siteId)?.assessedAt ?? '暂无' }}，
+          评估人 {{ siteStore.latestFactor(siteId)?.assessor ?? '—' }}）。
+        </p>
+      </template>
     </section>
 
     <section class="panel">
       <div class="panel__head">
-        <h2>多轮因子复核</h2>
+        <h2>
+          多轮因子复核
+          <el-tag v-if="siteStale" type="warning" size="small" effect="dark" class="ml8">
+            待复评
+          </el-tag>
+        </h2>
         <el-button
           size="small"
           type="primary"
@@ -416,7 +462,7 @@ watch(
             }
           "
         >
-          {{ showFactorForm ? '收起录入' : '追加一轮评估' }}
+          {{ showFactorForm ? '收起录入' : siteStale ? '补录新一轮实测' : '追加一轮评估' }}
         </el-button>
       </div>
 
@@ -646,5 +692,11 @@ watch(
 }
 .review-form {
   margin-bottom: 12px;
+}
+.stale-alert {
+  margin-bottom: 12px;
+}
+.ml8 {
+  margin-left: 8px;
 }
 </style>

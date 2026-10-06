@@ -12,7 +12,7 @@ import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
 import { useRanking } from '@/hooks/useRanking'
-import { NORMALIZE_LABELS, SEASONS, weightSumGuard } from '@/types/score'
+import { NORMALIZE_LABELS, SEASONS, defaultReviewValidDays, weightSumGuard } from '@/types/score'
 import type { FactorWeights, NormalizeMethod, GradeThresholds } from '@/types/score'
 import { formatScore } from '@/utils/format'
 import { weightSum } from '@/utils/score'
@@ -28,6 +28,7 @@ const activeSnapshot = ref<{
   normalize: NormalizeMethod
   thresholds: GradeThresholds
   season: string
+  reviewValidDays: number
 } | null>(null)
 
 function snapshotActive(): void {
@@ -37,9 +38,10 @@ function snapshotActive(): void {
     weights: { ...p.weights },
     normalize: p.normalize,
     thresholds: { ...p.thresholds },
-    season: p.season
+    season: p.season,
+    reviewValidDays: p.reviewValidDays
   }
-  uiStore.syncFromProfile(p.weights, p.normalize, p.thresholds, p.season)
+  uiStore.syncFromProfile(p.weights, p.normalize, p.thresholds, p.season, p.reviewValidDays)
 }
 
 onMounted(() => {
@@ -51,13 +53,14 @@ watch(
   () => snapshotActive()
 )
 
-const { ranked, best } = useRanking({
+const { ranked, stale, best } = useRanking({
   sites: () => siteStore.list,
   factorOf: (id: number) => siteStore.latestFactor(id),
   weights: () => uiStore.workingWeights,
   normalize: () => uiStore.workingNormalize,
   thresholds: () => uiStore.workingThresholds,
-  vetoedIds: () => uiStore.vetoedSiteIds
+  vetoedIds: () => uiStore.vetoedSiteIds,
+  reviewValidDays: () => uiStore.workingReviewValidDays
 })
 
 const totalWeight = computed(() => weightSum(uiStore.workingWeights))
@@ -109,29 +112,42 @@ function onThresholdChange(): void {
   uiStore.dirty = true
 }
 
+function setReviewValidDays(value: number | undefined): void {
+  if (typeof value !== 'number' || Number.isNaN(value)) return
+  uiStore.workingReviewValidDays = Math.max(1, Math.floor(value))
+  uiStore.dirty = true
+}
+
 function revertToActive(): void {
   const snap = activeSnapshot.value
   if (!snap) {
     ElMessage.info('当前没有启用中的方案')
     return
   }
-  uiStore.syncFromProfile(snap.weights, snap.normalize, snap.thresholds, snap.season)
+  uiStore.syncFromProfile(snap.weights, snap.normalize, snap.thresholds, snap.season, snap.reviewValidDays)
   ElMessage.success('已恢复到当前启用方案的权重')
 }
 
 /* --------------------------- 另存为季节方案 --------------------------- */
 const saveDialog = ref(false)
-const saveForm = ref({ name: '', season: '夏季', note: '', activate: true })
+const saveForm = ref({ name: '', season: '夏季', reviewValidDays: 14, note: '', activate: true })
 
 function openSaveDialog(): void {
   const base = profileStore.activeProfile?.name ?? '均衡型方案'
+  const season = saveForm.value.season || '夏季'
   saveForm.value = {
-    name: `${saveForm.value.season || '季节'}方案 · ${base}`,
-    season: saveForm.value.season || '夏季',
+    name: `${season}方案 · ${base}`,
+    season,
+    reviewValidDays: uiStore.workingReviewValidDays || defaultReviewValidDays(season),
     note: '',
     activate: true
   }
   saveDialog.value = true
+}
+
+/** 切换季节时按默认口径联动时效（雨季 14 天 / 旱季 30 天），仍可手改 */
+function onSaveSeasonChange(season: string): void {
+  saveForm.value.reviewValidDays = defaultReviewValidDays(season)
 }
 
 async function confirmSave(): Promise<void> {
@@ -146,6 +162,7 @@ async function confirmSave(): Promise<void> {
     normalize: uiStore.workingNormalize,
     thresholds: { ...uiStore.workingThresholds },
     season: saveForm.value.season,
+    reviewValidDays: saveForm.value.reviewValidDays,
     active: saveForm.value.activate,
     note:
       saveForm.value.note.trim() ||
@@ -207,7 +224,7 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
       <div class="page-head__title">
         <h1>权重与评分</h1>
         <p>
-          拖动下方各因子权重条，右侧名次会实时重排；调整归一方式与 A/B/C 阈值可改变整体松紧。
+          拖动下方各因子权重条，右侧名次会实时重排；调整归一方式、A/B/C 阈值与复评时效可改变整体松紧。
           满意后可另存为季节方案，首页与详情页会立即采用启用中的方案。
         </p>
       </div>
@@ -224,6 +241,7 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <div class="stat-card__extra">
           适用季节 {{ profileStore.activeProfile?.season ?? '—' }} ·
           {{ profileStore.activeProfile ? NORMALIZE_LABELS[profileStore.activeProfile.normalize] : '—' }}
+          · 时效 {{ profileStore.activeProfile?.reviewValidDays ?? '—' }} 天
         </div>
       </div>
       <div class="stat-card">
@@ -236,7 +254,7 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <div class="stat-card__value">
           {{ gradeDistribution.A }} / {{ gradeDistribution.B }} / {{ gradeDistribution.C }}
         </div>
-        <div class="stat-card__extra">随权重实时变化</div>
+        <div class="stat-card__extra">另有 {{ stale.length }} 个待复评退出比较</div>
       </div>
       <div class="stat-card">
         <div class="stat-card__label">当前第一名</div>
@@ -313,13 +331,32 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
             @update:model-value="setGradeB"
           />
         </div>
+        <div class="scoring-config__item">
+          <span class="scoring-config__label">复评时效</span>
+          <el-input-number
+            :model-value="uiStore.workingReviewValidDays"
+            :min="1"
+            :max="365"
+            :step="1"
+            size="small"
+            style="width: 110px"
+            controls-position="right"
+            @update:model-value="setReviewValidDays"
+          />
+          <span class="weight-note">
+            天 · 实测读数超过该天数的营位退出比较并标记待复评；默认口径雨季
+            {{ defaultReviewValidDays('夏季') }} 天、旱季 {{ defaultReviewValidDays('四季通用') }} 天
+          </span>
+        </div>
       </div>
     </section>
 
     <section class="panel">
       <div class="panel__head">
         <h2>实时名次（跟随权重刷新）</h2>
-        <span class="weight-note">共 {{ ranked.length }} 个营位</span>
+        <span class="weight-note">
+          共 {{ ranked.length }} 个营位参与比较 · {{ stale.length }} 个待复评已退出
+        </span>
       </div>
       <el-table :data="ranked" size="small" border stripe>
         <el-table-column label="名次" width="72" align="center">
@@ -390,6 +427,9 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <el-table-column label="阈值 A / B" width="120" align="center">
           <template #default="{ row }">{{ row.thresholds.gradeA }} / {{ row.thresholds.gradeB }}</template>
         </el-table-column>
+        <el-table-column label="复评时效" width="100" align="center">
+          <template #default="{ row }">{{ row.reviewValidDays }} 天</template>
+        </el-table-column>
         <el-table-column label="权重合计" width="106" align="center">
           <template #default="{ row }">{{ weightSum(row.weights) }}</template>
         </el-table-column>
@@ -411,9 +451,28 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
           <el-input id="profile-name" v-model="saveForm.name" placeholder="如 雨季防风方案" />
         </el-form-item>
         <el-form-item label="适用季节">
-          <el-select id="profile-season" v-model="saveForm.season" style="width: 100%">
+          <el-select
+            id="profile-season"
+            v-model="saveForm.season"
+            style="width: 100%"
+            @change="onSaveSeasonChange"
+          >
             <el-option v-for="s in SEASONS" :key="s" :label="s" :value="s" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="复评时效">
+          <el-input-number
+            id="profile-review-days"
+            v-model="saveForm.reviewValidDays"
+            :min="1"
+            :max="365"
+            :step="1"
+            controls-position="right"
+            style="width: 140px"
+          />
+          <span class="weight-note" style="margin-left: 10px">
+            天 · 随季节给默认值，可手改
+          </span>
         </el-form-item>
         <el-form-item label="备注">
           <el-input
@@ -430,7 +489,8 @@ async function removeProfileRow(id: number | undefined): Promise<void> {
         <el-form-item label="将保存">
           <span class="weight-note">
             权重合计 {{ totalWeight }} · {{ NORMALIZE_LABELS[uiStore.workingNormalize] }} · 阈值 A ≥
-            {{ uiStore.workingThresholds.gradeA }} / B ≥ {{ uiStore.workingThresholds.gradeB }}
+            {{ uiStore.workingThresholds.gradeA }} / B ≥ {{ uiStore.workingThresholds.gradeB }} ·
+            复评时效 {{ saveForm.reviewValidDays }} 天
           </span>
         </el-form-item>
       </el-form>

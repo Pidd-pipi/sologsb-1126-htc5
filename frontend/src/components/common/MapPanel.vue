@@ -10,6 +10,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { Campsite } from '@/types/campsite'
 import type { Grade } from '@/utils/score'
 import { GRADE_COLOR } from '@/utils/score'
+import { STALE_COLOR } from '@/utils/review'
 import { boundsOf, formatLat, formatLng, projectToGrid, unprojectFromGrid } from '@/utils/geo'
 import { useAmapLoader, type AmapMapInstance, type AmapMarker } from '@/hooks/useAmapLoader'
 
@@ -21,6 +22,8 @@ const props = withDefaults(
     selectedId?: number | null
     /** 每个营位的等级，用于着色 */
     gradeOf?: (siteId: number) => Grade
+    /** 每个营位是否超期待复评；为 true 时标记染灰并显示「待」 */
+    staleOf?: (siteId: number) => boolean
     /** pick 模式下点击空白处会抛出经纬度（用于选点登记） */
     mode?: 'view' | 'pick'
     /** 地图高度 */
@@ -31,6 +34,7 @@ const props = withDefaults(
   {
     selectedId: null,
     gradeOf: undefined,
+    staleOf: undefined,
     mode: 'view',
     height: '420px',
     title: '营位分布'
@@ -59,7 +63,16 @@ const points = computed(() =>
   props.sites.map((site) => {
     const pt = projectToGrid({ lng: site.lng, lat: site.lat }, bounds.value, GRID_W, GRID_H)
     const grade: Grade = props.gradeOf ? props.gradeOf(site.id ?? -1) : 'C'
-    return { site, x: pt.x, y: pt.y, color: GRADE_COLOR[grade], grade }
+    const stale = props.staleOf ? props.staleOf(site.id ?? -1) : false
+    return {
+      site,
+      x: pt.x,
+      y: pt.y,
+      stale,
+      color: stale ? STALE_COLOR : GRADE_COLOR[grade],
+      grade,
+      mark: stale ? '待' : grade
+    }
   })
 )
 
@@ -110,7 +123,7 @@ function renderAmapMarkers(): void {
     const marker = new ns.Marker({
       position: [item.site.lng, item.site.lat],
       title: `${item.site.code} ${item.site.name}`,
-      content: `<div class="gb-amap-pin" style="--pin:${item.color}"><span>${item.site.code.slice(-2)}</span><em>${item.grade}</em></div>`,
+      content: `<div class="gb-amap-pin" style="--pin:${item.color}"><span>${item.site.code.slice(-2)}</span><em>${item.mark}</em></div>`,
       offset: new ns.Pixel(-16, -16)
     })
     marker.on('click', () => emit('select', item.site.id as number))
@@ -160,7 +173,8 @@ watch(
 )
 
 watch(
-  () => props.sites.map((s) => `${s.id}:${s.lng}:${s.lat}`).join('|'),
+  // 位置、等级色与待复评状态任一变化都重绘高德标记，保证地图颜色与名次同步
+  () => points.value.map((p) => `${p.site.id}:${p.x}:${p.y}:${p.color}:${p.mark}`).join('|'),
   () => {
     if (amap.value && !degraded.value) renderAmapMarkers()
   }
@@ -246,16 +260,24 @@ onBeforeUnmount(() => {
           v-for="pt in points"
           :key="`pt-${pt.site.id}`"
           class="map-panel__node"
-          :class="{ 'is-active': pt.site.id === selectedId }"
+          :class="{ 'is-active': pt.site.id === selectedId, 'is-stale': pt.stale }"
           tabindex="0"
           role="button"
           :aria-label="`${pt.site.code} ${pt.site.name}`"
           @click.stop="emit('select', pt.site.id as number)"
         >
           <circle :cx="pt.x" :cy="pt.y" r="16" :fill="pt.color" opacity="0.16" />
-          <circle :cx="pt.x" :cy="pt.y" r="9" :fill="pt.color" stroke="#ffffff" stroke-width="2" />
+          <circle
+            :cx="pt.x"
+            :cy="pt.y"
+            r="9"
+            :fill="pt.color"
+            stroke="#ffffff"
+            stroke-width="2"
+            :stroke-dasharray="pt.stale ? '3 2' : undefined"
+          />
           <text :x="pt.x" :y="pt.y + 3.5" text-anchor="middle" class="map-panel__nodeText">
-            {{ pt.grade }}
+            {{ pt.mark }}
           </text>
           <text :x="pt.x + 14" :y="pt.y - 10" class="map-panel__nodeLabel">
             {{ pt.site.code }}

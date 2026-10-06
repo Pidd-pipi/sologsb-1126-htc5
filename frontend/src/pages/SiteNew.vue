@@ -25,6 +25,7 @@ import {
   weightedTotal,
   type Grade
 } from '@/utils/score'
+import { isReviewExpired } from '@/utils/review'
 import { isValidLngLat, formatLng, formatLat } from '@/utils/geo'
 import { formatFactorValue, todayIso } from '@/utils/format'
 
@@ -202,12 +203,15 @@ const previewNormalize = computed(() => profileStore.activeProfile?.normalize ??
 const previewRaw = computed(() => rawValuesOf(previewSite.value, previewFactor.value))
 
 /**
- * 极差归一必须同批比较：把「已在库营位 + 当前候选营位」放进同一批，
+ * 极差归一必须同批比较：把「时效内的在库营位 + 当前候选营位」放进同一批，
  * 否则单条样本跨度为零，候选营位会拿到虚高的满分。
+ * 超期待复评的营位已退出本批比较，预览口径与名次表保持一致。
  */
 const previewMatrix = computed(() => {
+  const validDays = profileStore.activeProfile?.reviewValidDays ?? 30
   const entries = siteStore.list
     .filter((s): s is typeof s & { id: number } => typeof s.id === 'number')
+    .filter((s) => !isReviewExpired(siteStore.latestFactor(s.id), validDays))
     .map((s) => ({ siteId: s.id, values: rawValuesOf(s, siteStore.latestFactor(s.id)) }))
   entries.push({ siteId: 0, values: previewRaw.value })
   return buildNormalizedMatrix(entries, previewNormalize.value)
@@ -216,6 +220,12 @@ const previewMatrix = computed(() => {
 const previewNormalized = computed(
   () => previewMatrix.value.get(0) ?? ({} as Record<FactorKey, number>)
 )
+
+/** 选点地图上的既有营位同样按时效着色：超期的染灰标记「待」 */
+function staleOfSite(siteId: number): boolean {
+  const validDays = profileStore.activeProfile?.reviewValidDays ?? 30
+  return isReviewExpired(siteStore.latestFactor(siteId), validDays)
+}
 
 const previewRows = computed(() =>
   buildFactorRows(previewNormalized.value, previewWeights.value).map((row) => ({
@@ -322,6 +332,7 @@ async function submit(): Promise<void> {
     <MapPanel
       :sites="siteStore.list"
       :selected-id="null"
+      :stale-of="staleOfSite"
       mode="pick"
       height="380px"
       title="候选营位分布（点选拾取经纬度）"
